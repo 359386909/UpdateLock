@@ -1,0 +1,83 @@
+# Win7/10/11 自动更新关闭工具
+
+一个原生 C++/Win32 单文件工具，自动识别 Windows 7、Windows 10 或 Windows 11，并使用对应策略关闭 Windows Update。
+
+## 主要特性
+
+- 原生 Win32 x86 EXE，无 .NET、无额外运行时依赖。
+- 使用 `/MT` 静态 CRT，可在 Win7 SP1、Win10、Win11 上直接运行。
+- 注册表通过 Win32 Registry API 操作；Win7 的 `wuauserv` 通过 SCM API 操作。
+- 不调用 PowerShell、CMD、`reg.exe` 或 `sc.exe`。
+- 修改前保存原始状态，支持一键恢复、写入后回读验证和失败回滚。
+- UAC 管理员权限和单实例保护。
+
+## 系统策略
+
+### Windows 7
+
+只处理：
+
+- `NoAutoUpdate`
+- `DisableWindowsUpdateAccess`
+- `wuauserv` 停止并禁用
+
+不会处理 BITS、CryptSvc、TrustedInstaller、SoftwareDistribution、Catroot2 或系统文件。
+
+原始状态保存到：
+
+```text
+%ProgramData%\UpdateLock\windows7-original-state-v1.txt
+```
+
+### Windows 10 / Windows 11
+
+处理原六项策略：
+
+- `ExcludeWUDriversInQualityUpdate`
+- `SetUpdateNotificationLevel`
+- `UpdateNotificationLevel`
+- `NoAutoUpdate`
+- `NoAutoRebootWithLoggedOnUsers`
+- `AUOptions`（关闭时删除，恢复时还原原状态）
+
+2.1 额外设置：
+
+- `SetDisableUXWUAccess=1`
+
+该策略会隐藏或禁用 Windows Update 页面中的手动检查、下载和安装入口。Win10/11 不停止 `wuauserv`、BITS、UsoSvc、WaaSMedicSvc 或 Update Orchestrator。
+
+备份文件：
+
+```text
+%ProgramData%\UpdateLock\policy-backup-v1.txt
+%ProgramData%\UpdateLock\windows-update-access-backup-v1.txt
+```
+
+原六项备份格式保持兼容，2.1 的访问封锁使用独立备份文件。
+
+## 重要影响
+
+关闭 Windows Update 驱动更新后，新接入的 USB 或其他硬件可能无法自动在线获取驱动。此时可从硬件厂商官网下载并离线安装驱动，或先恢复更新、安装驱动后再重新关闭。
+
+不要在系统正在安装或卸载更新时运行关闭或恢复操作。
+
+## 构建
+
+需要 Visual Studio Build Tools、MSVC v141 工具链和 Windows 10 SDK 19041。在 `native` 目录运行：
+
+```bat
+build-native.cmd
+```
+
+构建输出位于 `native\build`。脚本同时生成 `UpdateLock.exe` 和只使用临时目录的原生测试程序。
+
+## 下载与校验
+
+普通用户请从 GitHub Releases 下载单文件 EXE，并使用 Release 中公布的 SHA-256 校验文件完整性。
+
+当前 EXE 的作者元数据为“啊常用户”，但尚未使用受信任的 Authenticode 证书签名，因此 Windows 仍可能提示“未知发布者”或显示 SmartScreen 警告。
+
+## 验证边界
+
+已完成原生构建、单元测试和二进制依赖检查。不同补丁级别和定制系统可能存在行为差异，真实机器操作前应确保重要数据已有备份。
+

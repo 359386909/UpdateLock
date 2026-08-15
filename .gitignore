@@ -1,0 +1,9 @@
+native/build/
+*.obj
+*.pdb
+*.log
+*.ilk
+*.exp
+*.lib
+release/
+

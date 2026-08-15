@@ -1,0 +1,13 @@
+#pragma once
+
+#define IDI_APP_ICON 101
+#define IDR_MANIFEST 1
+
+#define IDC_SYSTEM 1001
+#define IDC_DESCRIPTION 1002
+#define IDC_STATUS 1003
+#define IDC_DETAILS 1004
+#define IDC_DISABLE 1005
+#define IDC_RESTORE 1006
+#define IDC_WARNING 1007
+

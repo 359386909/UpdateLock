@@ -1,0 +1,38 @@
+#include <windows.h>
+#include "resource.h"
+
+IDI_APP_ICON ICON "..\\assets\\UpdateLock.ico"
+IDR_MANIFEST RT_MANIFEST "UpdateLock.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 2,1,0,0
+ PRODUCTVERSION 2,1,0,0
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404B0"
+        BEGIN
+            VALUE "CompanyName", "啊常用户\0"
+            VALUE "FileDescription", "Win7/10/11 自动更新关闭工具\0"
+            VALUE "FileVersion", "2.1.0.0\0"
+            VALUE "InternalName", "UpdateLock.exe\0"
+            VALUE "LegalCopyright", "Copyright © 啊常用户\0"
+            VALUE "OriginalFilename", "Win7-10-11 自动更新关闭工具.exe\0"
+            VALUE "ProductName", "Win7/10/11 自动更新关闭工具\0"
+            VALUE "ProductVersion", "2.1.0.0\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END
