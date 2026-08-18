@@ -55,6 +55,22 @@
 
 原六项备份格式保持兼容，2.1 的访问封锁使用独立备份文件。
 
+### Windows 10 禁止升级到 Windows 11
+
+Windows 10 界面另外提供“禁止升级到 Windows 11”和“恢复允许升级到 Windows 11”。该功能与自动更新控制独立，只写入：
+
+- `ProductVersion=Windows 10`
+- `TargetReleaseVersion=1`
+- `TargetReleaseVersionInfo=当前实际 Windows 10 功能版本`
+
+功能版本按 `RtlGetVersion` 的真实 Build 与 `DisplayVersion`、`ReleaseId` 交叉校验，支持 1507 至 22H2 的已知 Build；未知 Build 会拒绝写入。首次修改前的原始存在性、注册表类型和值保存到：
+
+```text
+%ProgramData%\UpdateLock\windows11-upgrade-backup-v1.txt
+```
+
+Windows 7 和 Windows 11 上该组按钮不可用，底层调用也会拒绝写入。该功能不会禁用更新服务、修改 TPM/Secure Boot 或删除系统文件，也不会把旧版 Windows 10 自动升级到 22H2。
+
 ## 重要影响
 
 关闭 Windows Update 驱动更新后，新接入的 USB 或其他硬件可能无法自动在线获取驱动。此时可从硬件厂商官网下载并离线安装驱动，或先恢复更新、安装驱动后再重新关闭。

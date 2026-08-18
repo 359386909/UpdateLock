@@ -1,5 +1,13 @@
 # 版本说明
 
+## 未发布
+
+- 新增仅适用于 Windows 10 的“禁止升级到 Windows 11”与独立恢复功能。
+- 自动识别当前真实 Windows 10 功能版本，按 Build、`DisplayVersion`、`ReleaseId` 交叉校验；未知 Build 拒绝写入。
+- 新功能仅写入 `ProductVersion`、`TargetReleaseVersion`、`TargetReleaseVersionInfo`，不改动现有自动更新策略或服务控制。
+- 新增独立备份 `%ProgramData%\UpdateLock\windows11-upgrade-backup-v1.txt`，保留原始存在性、类型和值，恢复成功后才删除备份。
+- Windows 7 和 Windows 11 上新功能按钮灰显，底层调用同样零写入。
+
 ## 2.1.0
 
 在 2.0 基础上加强 Windows 10/11 的手动更新入口封锁，不重复改动既有控制逻辑：

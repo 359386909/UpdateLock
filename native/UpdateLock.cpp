@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cwctype>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -28,6 +29,7 @@ const wchar_t* const kAppName = L"Win7/10/11 自动更新关闭工具";
 const wchar_t* const kMutexName = L"Global\\UpdateLock.SingleInstance.7A64EA9A";
 const wchar_t* const kWindowsUpdate = L"SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate";
 const wchar_t* const kAutomaticUpdates = L"SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU";
+const wchar_t* const kCurrentVersion = L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
 const REGSAM kRegistryView = KEY_WOW64_64KEY;
 
 struct AppError : public std::exception {
@@ -92,6 +94,40 @@ std::string Base64Encode(const std::wstring& value) {
         static_cast<DWORD>(bytes.size()), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
         &result[0], &count)) ThrowWin32(L"Base64 编码");
     if (!result.empty() && result.back() == '\0') result.pop_back();
+    return result;
+}
+
+std::string Base64EncodeBytes(const std::vector<BYTE>& bytes) {
+    if (bytes.empty()) return std::string();
+    DWORD count = 0;
+    const BYTE* data = bytes.data();
+    if (!CryptBinaryToStringA(data, static_cast<DWORD>(bytes.size()),
+        CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, nullptr, &count)) {
+        ThrowWin32(L"Base64 编码");
+    }
+    if (count == 0) return std::string();
+    std::string result(count, '\0');
+    if (!CryptBinaryToStringA(data, static_cast<DWORD>(bytes.size()),
+        CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, &result[0], &count)) {
+        ThrowWin32(L"Base64 编码");
+    }
+    if (!result.empty() && result.back() == '\0') result.pop_back();
+    return result;
+}
+
+std::vector<BYTE> Base64DecodeBytes(const std::string& value) {
+    if (value.empty()) return {};
+    DWORD count = 0;
+    if (!CryptStringToBinaryA(value.c_str(), static_cast<DWORD>(value.size()),
+        CRYPT_STRING_BASE64, nullptr, &count, nullptr, nullptr)) {
+        throw AppError(L"备份文件包含无效 Base64。" );
+    }
+    std::vector<BYTE> result(count);
+    if (!CryptStringToBinaryA(value.c_str(), static_cast<DWORD>(value.size()),
+        CRYPT_STRING_BASE64, result.data(), &count, nullptr, nullptr)) {
+        throw AppError(L"备份文件包含无效 Base64。" );
+    }
+    result.resize(count);
     return result;
 }
 
@@ -182,6 +218,13 @@ struct PolicyValue {
     const wchar_t* name;
 };
 
+struct RawRegistryState {
+    const PolicyValue* policy;
+    bool exists;
+    DWORD type;
+    std::vector<BYTE> data;
+};
+
 struct PolicyState {
     const PolicyValue* policy;
     bool exists;
@@ -190,6 +233,100 @@ struct PolicyState {
 
 bool SamePolicy(const PolicyValue& a, const std::wstring& path, const std::wstring& name) {
     return path == a.path && name == a.name;
+}
+
+RawRegistryState ReadRawRegistryState(const PolicyValue& policy) {
+    ScopedRegKey key;
+    const LSTATUS opened = RegOpenKeyExW(HKEY_LOCAL_MACHINE, policy.path, 0,
+        KEY_QUERY_VALUE | kRegistryView, &key.value);
+    if (opened == ERROR_FILE_NOT_FOUND || opened == ERROR_PATH_NOT_FOUND) {
+        return RawRegistryState{&policy, false, 0, {}};
+    }
+    if (opened != ERROR_SUCCESS) ThrowWin32(L"读取注册表值", opened);
+
+    DWORD type = 0;
+    DWORD size = 0;
+    LSTATUS queried = RegQueryValueExW(key.value, policy.name, nullptr, &type, nullptr, &size);
+    if (queried == ERROR_FILE_NOT_FOUND) return RawRegistryState{&policy, false, 0, {}};
+    if (queried != ERROR_SUCCESS) ThrowWin32(L"读取注册表值大小", queried);
+    if (size > 1024 * 1024) throw AppError(L"注册表值过大，拒绝读取。" );
+
+    std::vector<BYTE> data(size);
+    queried = RegQueryValueExW(key.value, policy.name, nullptr, &type,
+        data.empty() ? nullptr : data.data(), &size);
+    if (queried != ERROR_SUCCESS) ThrowWin32(L"读取注册表值", queried);
+    data.resize(size);
+    return RawRegistryState{&policy, true, type, std::move(data)};
+}
+
+void SetRawRegistryState(const RawRegistryState& state) {
+    if (!state.exists || state.type == 0 || state.data.size() > MAXDWORD) {
+        throw AppError(L"要写入的注册表原始状态无效。" );
+    }
+    ScopedRegKey key;
+    DWORD disposition = 0;
+    const LSTATUS created = RegCreateKeyExW(HKEY_LOCAL_MACHINE, state.policy->path, 0, nullptr,
+        REG_OPTION_NON_VOLATILE, KEY_SET_VALUE | KEY_QUERY_VALUE | kRegistryView, nullptr,
+        &key.value, &disposition);
+    if (created != ERROR_SUCCESS) ThrowWin32(L"写入注册表值", created);
+    const LSTATUS written = RegSetValueExW(key.value, state.policy->name, 0, state.type,
+        state.data.data(), static_cast<DWORD>(state.data.size()));
+    if (written != ERROR_SUCCESS) ThrowWin32(L"写入注册表值", written);
+}
+
+void DeleteRawRegistryValue(const PolicyValue& policy) {
+    ScopedRegKey key;
+    const LSTATUS opened = RegOpenKeyExW(HKEY_LOCAL_MACHINE, policy.path, 0,
+        KEY_SET_VALUE | KEY_QUERY_VALUE | kRegistryView, &key.value);
+    if (opened == ERROR_FILE_NOT_FOUND || opened == ERROR_PATH_NOT_FOUND) return;
+    if (opened != ERROR_SUCCESS) ThrowWin32(L"打开注册表值", opened);
+    const LSTATUS deleted = RegDeleteValueW(key.value, policy.name);
+    if (deleted != ERROR_SUCCESS && deleted != ERROR_FILE_NOT_FOUND) {
+        ThrowWin32(L"删除注册表值", deleted);
+    }
+}
+
+void RestoreRawRegistryState(const RawRegistryState& state) {
+    if (state.exists) SetRawRegistryState(state);
+    else DeleteRawRegistryValue(*state.policy);
+}
+
+void VerifyRawRegistryState(const RawRegistryState& expected) {
+    const RawRegistryState actual = ReadRawRegistryState(*expected.policy);
+    if (actual.exists != expected.exists ||
+        (actual.exists && (actual.type != expected.type || actual.data != expected.data))) {
+        throw AppError(std::wstring(expected.policy->name) + L" 回读不一致。" );
+    }
+}
+
+std::wstring RawRegistryString(const RawRegistryState& state) {
+    if (!state.exists || state.type != REG_SZ || state.data.size() % sizeof(wchar_t) != 0) {
+        return std::wstring();
+    }
+    std::wstring value(state.data.size() / sizeof(wchar_t), L'\0');
+    if (!state.data.empty()) std::memcpy(&value[0], state.data.data(), state.data.size());
+    while (!value.empty() && value.back() == L'\0') value.pop_back();
+    return value;
+}
+
+RawRegistryState MakeRegistryStringState(const PolicyValue& policy, const std::wstring& value) {
+    RawRegistryState state{&policy, true, REG_SZ,
+        std::vector<BYTE>((value.size() + 1) * sizeof(wchar_t))};
+    std::memcpy(state.data.data(), value.c_str(), state.data.size());
+    return state;
+}
+
+RawRegistryState MakeRegistryDwordState(const PolicyValue& policy, DWORD value) {
+    RawRegistryState state{&policy, true, REG_DWORD, std::vector<BYTE>(sizeof(DWORD))};
+    std::memcpy(state.data.data(), &value, sizeof(value));
+    return state;
+}
+
+bool IsRegistryDword(const RawRegistryState& state, DWORD expected) {
+    if (!state.exists || state.type != REG_DWORD || state.data.size() != sizeof(DWORD)) return false;
+    DWORD value = 0;
+    std::memcpy(&value, state.data.data(), sizeof(value));
+    return value == expected;
 }
 
 PolicyState ReadDwordState(const PolicyValue& policy) {
@@ -393,6 +530,115 @@ VersionInfo ReadWindowsVersion() {
     return VersionInfo{info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber,
                        info.wProductType};
 }
+
+enum class Windows10VersionSource { DisplayVersion, ReleaseId, BuildMapping };
+
+struct Windows10VersionInfo {
+    bool isWindows10 = false;
+    bool known = false;
+    DWORD build = 0;
+    DWORD revision = 0;
+    std::wstring functionalVersion;
+    Windows10VersionSource source = Windows10VersionSource::BuildMapping;
+    std::wstring error;
+};
+
+struct Windows10BuildMapping {
+    DWORD build;
+    const wchar_t* functionalVersion;
+};
+
+const std::array<Windows10BuildMapping, 14> kWindows10BuildMappings = {{
+    {10240, L"1507"}, {10586, L"1511"}, {14393, L"1607"}, {15063, L"1703"},
+    {16299, L"1709"}, {17134, L"1803"}, {17763, L"1809"}, {18362, L"1903"},
+    {18363, L"1909"}, {19041, L"2004"}, {19042, L"20H2"}, {19043, L"21H1"},
+    {19044, L"21H2"}, {19045, L"22H2"}
+}};
+
+const Windows10BuildMapping* FindWindows10BuildMapping(DWORD build) {
+    for (const Windows10BuildMapping& mapping : kWindows10BuildMappings) {
+        if (mapping.build == build) return &mapping;
+    }
+    return nullptr;
+}
+
+bool IsDigits(const std::wstring& value) {
+    if (value.empty()) return false;
+    return std::all_of(value.begin(), value.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; });
+}
+
+bool IsDisplayVersionFormat(const std::wstring& value) {
+    return value.size() == 4 && value[2] == L'H' &&
+        value[0] >= L'0' && value[0] <= L'9' && value[1] >= L'0' && value[1] <= L'9' &&
+        (value[3] == L'1' || value[3] == L'2');
+}
+
+bool IsReleaseIdFormat(const std::wstring& value) {
+    return value.size() == 4 && IsDigits(value);
+}
+
+std::wstring ReadOptionalRegistryString(const wchar_t* name) {
+    const PolicyValue policy{kCurrentVersion, name};
+    return RawRegistryString(ReadRawRegistryState(policy));
+}
+
+DWORD ReadOptionalRegistryDword(const wchar_t* name) {
+    const PolicyValue policy{kCurrentVersion, name};
+    const RawRegistryState state = ReadRawRegistryState(policy);
+    if (!state.exists || state.type != REG_DWORD || state.data.size() != sizeof(DWORD)) return 0;
+    DWORD value = 0;
+    std::memcpy(&value, state.data.data(), sizeof(value));
+    return value;
+}
+
+class Windows10VersionDetector {
+public:
+    static Windows10VersionInfo Resolve(const VersionInfo& version,
+        const std::wstring& displayVersion, const std::wstring& releaseId, DWORD revision) {
+        Windows10VersionInfo result;
+        result.isWindows10 = version.major == 10 && version.minor == 0 && version.build < 22000;
+        result.build = version.build;
+        result.revision = revision;
+        if (!result.isWindows10) return result;
+
+        const Windows10BuildMapping* mapping = FindWindows10BuildMapping(version.build);
+        if (!mapping) {
+            result.error = L"已确认当前系统为 Windows 10，但当前 Build 无法映射到已知功能版本。\r\nBuild：" +
+                std::to_wstring(version.build) + L"\r\n为避免写入错误目标版本，本次未修改系统。";
+            return result;
+        }
+
+        if (IsDisplayVersionFormat(displayVersion) && displayVersion == mapping->functionalVersion) {
+            result.known = true;
+            result.functionalVersion = displayVersion;
+            result.source = Windows10VersionSource::DisplayVersion;
+        } else if (!IsDisplayVersionFormat(displayVersion) && IsReleaseIdFormat(releaseId) &&
+                   releaseId == mapping->functionalVersion) {
+            result.known = true;
+            result.functionalVersion = releaseId;
+            result.source = Windows10VersionSource::ReleaseId;
+        } else {
+            result.known = true;
+            result.functionalVersion = mapping->functionalVersion;
+            result.source = Windows10VersionSource::BuildMapping;
+        }
+        return result;
+    }
+
+    static Windows10VersionInfo Detect(const VersionInfo& version) {
+        return Resolve(version, ReadOptionalRegistryString(L"DisplayVersion"),
+            ReadOptionalRegistryString(L"ReleaseId"), ReadOptionalRegistryDword(L"UBR"));
+    }
+
+    static const wchar_t* SourceName(Windows10VersionSource source) {
+        switch (source) {
+        case Windows10VersionSource::DisplayVersion: return L"DisplayVersion";
+        case Windows10VersionSource::ReleaseId: return L"ReleaseId";
+        case Windows10VersionSource::BuildMapping: return L"Build 识别";
+        }
+        return L"Build 识别";
+    }
+};
 
 class IUpdateController {
 public:
@@ -929,22 +1175,292 @@ private:
 const PolicyValue Windows7UpdateController::kNoAutoUpdate={kAutomaticUpdates,L"NoAutoUpdate"};
 const PolicyValue Windows7UpdateController::kDisableAccess={kWindowsUpdate,L"DisableWindowsUpdateAccess"};
 
+class Windows11UpgradeBlocker {
+public:
+    Windows11UpgradeBlocker() : backupPath_(BackupDirectory() + L"\\windows11-upgrade-backup-v1.txt") {}
+
+    std::wstring Description() const {
+        return L"仅在 Windows 10 上锁定当前功能版本，阻止正常 Windows Update 路径升级到 Windows 11。";
+    }
+
+    std::wstring Warning() const {
+        return L"Windows 11 升级控制只写入 ProductVersion、TargetReleaseVersion 和 TargetReleaseVersionInfo。\r\n"
+               L"不会禁用更新服务，不修改 TPM、Secure Boot 或硬件兼容性检查。";
+    }
+
+    std::wstring Confirmation() const {
+        return L"这会把当前 Windows 10 锁定在当前实际功能版本，阻止正常 Windows Update 路径升级到 Windows 11。\r\n"
+               L"不会自动把旧版 Windows 10 升级到 22H2，也不会修改 Windows 自动更新控制。";
+    }
+
+    std::wstring BlockButtonText() const { return L"禁止升级到 Windows 11"; }
+    std::wstring RestoreButtonText() const { return L"恢复允许升级到 Windows 11"; }
+    bool CanRestore(const VersionInfo& version) const {
+        return IsWindows10(version) && FileExists(backupPath_);
+    }
+
+#ifdef UPDATELOCK_TEST
+    const std::wstring& TestBackupPath() const { return backupPath_; }
+    void TestSetBackupPath(const std::wstring& path) { backupPath_ = path; }
+    std::array<RawRegistryState, 3> TestReadBackup() const { return ReadBackup(); }
+    static UpdateStatus TestBuildStatus(const Windows10VersionInfo& version, bool anyValues,
+        bool productTarget, bool targetTarget, bool infoTarget, const std::wstring& configuredInfo) {
+        return BuildStatus(version, anyValues, productTarget, targetTarget, infoTarget, configuredInfo);
+    }
+#endif
+
+    UpdateStatus GetStatus(const VersionInfo& version) const {
+        if (!IsWindows10(version)) {
+            if (version.major == 10 && version.build >= 22000) {
+                return UpdateStatus{StatusLevel::Enabled,
+                    L"Windows 11 升级状态：当前系统已是 Windows 11",
+                    {L"当前系统已是 Windows 11；本功能不适用。"}};
+            }
+            return UpdateStatus{StatusLevel::Enabled,
+                L"Windows 11 升级状态：当前系统不适用",
+                {L"本功能只适用于 Windows 10，当前系统不会读取或写入升级锁定策略。"}};
+        }
+
+        const Windows10VersionInfo detected = Windows10VersionDetector::Detect(version);
+        if (!detected.known) {
+            return UpdateStatus{StatusLevel::PartiallyDisabled,
+                L"Windows 11 升级状态：无法确认当前功能版本",
+                {L"当前系统：Windows 10", L"OS Build：" + std::to_wstring(detected.build) +
+                    (detected.revision ? L"." + std::to_wstring(detected.revision) : L""), detected.error}};
+        }
+
+        const std::array<RawRegistryState, 3> states = Capture();
+        const bool productTarget = IsStringTarget(states[0], L"Windows 10");
+        const bool targetTarget = IsRegistryDword(states[1], 1);
+        const std::wstring configuredInfo = RawRegistryString(states[2]);
+        const bool infoTarget = states[2].exists && states[2].type == REG_SZ &&
+            configuredInfo == detected.functionalVersion;
+        const bool anyValues = states[0].exists || states[1].exists || states[2].exists;
+        return BuildStatus(detected, anyValues, productTarget, targetTarget, infoTarget, configuredInfo);
+    }
+
+    OperationResult Block(const VersionInfo& version) {
+        const Windows10VersionInfo detected = Windows10VersionDetector::Detect(version);
+        if (!detected.isWindows10) {
+            return {OperationOutcome::Failed,
+                L"“禁止升级到 Windows 11”只适用于 Windows 10，当前系统未修改。"};
+        }
+        if (!detected.known) return {OperationOutcome::Failed, detected.error};
+
+        const std::array<RawRegistryState, 3> before = Capture();
+        try {
+            SaveOriginalIfNeeded(before);
+            ApplyTarget(detected);
+            const UpdateStatus status = GetStatus(version);
+            if (status.title != L"Windows 11 升级状态：已阻止") {
+                throw AppError(L"Windows 11 升级锁定写入后整体回读未达到目标状态。" );
+            }
+            return {OperationOutcome::Success,
+                L"已将当前 Windows 10 锁定在功能版本 " + detected.functionalVersion + L"。\r\n\r\n"
+                L"Windows 11 正常升级路径已阻止。"};
+        } catch (const AppError& error) {
+            return BlockFailure(before, error.message);
+        } catch (...) {
+            return BlockFailure(before, L"发生未预期的原生运行时错误。");
+        }
+    }
+
+    OperationResult Restore(const VersionInfo& version) {
+        if (!IsWindows10(version)) {
+            return {OperationOutcome::Failed,
+                L"“恢复允许升级到 Windows 11”只适用于 Windows 10，当前系统未修改。"};
+        }
+        const std::array<RawRegistryState, 3> before = Capture();
+        try {
+            const std::array<RawRegistryState, 3> original = ReadBackup();
+            RestoreStates(original);
+            VerifyStates(original);
+            if (!DeleteFileW(backupPath_.c_str())) {
+                const DWORD error = GetLastError();
+                if (error != ERROR_FILE_NOT_FOUND) {
+                    return {OperationOutcome::PartialSuccess,
+                        L"Windows 11 升级策略已经恢复并验证，但无法删除备份文件：\r\n" +
+                        Win32Message(error)};
+                }
+            }
+            return {OperationOutcome::Success, L"已恢复允许升级到 Windows 11，并还原首次操作前的原始策略状态。"};
+        } catch (const AppError& error) {
+            return RestoreFailure(before, error.message);
+        } catch (...) {
+            return RestoreFailure(before, L"发生未预期的原生运行时错误。");
+        }
+    }
+
+private:
+    static const std::array<PolicyValue, 3> kPolicies;
+    std::wstring backupPath_;
+
+    static bool IsWindows10(const VersionInfo& version) {
+        return version.major == 10 && version.minor == 0 && version.build < 22000;
+    }
+
+    static std::array<RawRegistryState, 3> Capture() {
+        return {ReadRawRegistryState(kPolicies[0]), ReadRawRegistryState(kPolicies[1]),
+                ReadRawRegistryState(kPolicies[2])};
+    }
+
+    static bool IsStringTarget(const RawRegistryState& state, const std::wstring& expected) {
+        return state.exists && state.type == REG_SZ && RawRegistryString(state) == expected;
+    }
+
+    static UpdateStatus BuildStatus(const Windows10VersionInfo& version, bool anyValues,
+        bool productTarget, bool targetTarget, bool infoTarget, const std::wstring& configuredInfo) {
+        if (!anyValues) {
+            return UpdateStatus{StatusLevel::Enabled, L"Windows 11 升级状态：允许", {
+                L"当前系统：Windows 10 " + version.functionalVersion,
+                L"OS Build：" + std::to_wstring(version.build) +
+                    (version.revision ? L"." + std::to_wstring(version.revision) : L""),
+                L"目标产品：未配置"}};
+        }
+        if (productTarget && targetTarget && infoTarget) {
+            return UpdateStatus{StatusLevel::Disabled, L"Windows 11 升级状态：已阻止", {
+                L"当前系统：Windows 10 " + version.functionalVersion,
+                L"OS Build：" + std::to_wstring(version.build) +
+                    (version.revision ? L"." + std::to_wstring(version.revision) : L""),
+                L"锁定版本：Windows 10 " + version.functionalVersion}};
+        }
+        if (productTarget && targetTarget && !configuredInfo.empty() && !infoTarget) {
+            return UpdateStatus{StatusLevel::PartiallyDisabled,
+                L"Windows 11 升级状态：目标版本与当前系统不一致", {
+                    L"当前系统：Windows 10 " + version.functionalVersion,
+                    L"配置目标：Windows 10 " + configuredInfo,
+                    L"请重新点击“禁止升级到 Windows 11”更新当前目标版本。"}};
+        }
+        return UpdateStatus{StatusLevel::PartiallyDisabled, L"Windows 11 升级状态：部分配置", {
+            L"当前系统：Windows 10 " + version.functionalVersion,
+            std::wstring(L"ProductVersion：") + (productTarget ? L"Windows 10" : L"未达到目标"),
+            std::wstring(L"TargetReleaseVersion：") + (targetTarget ? L"1" : L"未达到目标"),
+            std::wstring(L"TargetReleaseVersionInfo：") + (infoTarget ? version.functionalVersion : L"未达到目标")}};
+    }
+
+    void SaveOriginalIfNeeded(const std::array<RawRegistryState, 3>& original) {
+        PrepareBackupDirectory();
+        if (FileExists(backupPath_)) { (void)ReadBackup(); return; }
+        std::vector<std::string> lines{"UpdateLock-Windows11Upgrade|1"};
+        for (const RawRegistryState& state : original) {
+            lines.push_back("RAW|" + Base64Encode(state.policy->path) + "|" +
+                Base64Encode(state.policy->name) + "|" + (state.exists ? "1" : "0") + "|" +
+                std::to_string(state.type) + "|" + Base64EncodeBytes(state.data));
+        }
+        WriteUtf8LinesAtomically(backupPath_, lines, false);
+    }
+
+    std::array<RawRegistryState, 3> ReadBackup() const {
+        const std::vector<std::string> lines = ReadUtf8Lines(backupPath_);
+        if (lines.size() != 4 || lines[0] != "UpdateLock-Windows11Upgrade|1") {
+            throw AppError(L"Windows 11 升级备份格式无效。" );
+        }
+        std::array<RawRegistryState, 3> result{};
+        for (size_t i = 0; i < kPolicies.size(); ++i) {
+            const std::vector<std::string> parts = Split(lines[i + 1], '|');
+            if (parts.size() != 6 || parts[0] != "RAW" || (parts[3] != "0" && parts[3] != "1")) {
+                throw AppError(L"Windows 11 升级备份包含无效项目。" );
+            }
+            const std::wstring path = Base64Decode(parts[1]);
+            const std::wstring name = Base64Decode(parts[2]);
+            const PolicyValue* allowed = nullptr;
+            for (const PolicyValue& policy : kPolicies) {
+                if (SamePolicy(policy, path, name)) allowed = &policy;
+            }
+            if (!allowed) throw AppError(L"Windows 11 升级备份包含未允许项目。" );
+            for (size_t j = 0; j < i; ++j) {
+                if (result[j].policy == allowed) throw AppError(L"Windows 11 升级备份包含重复项目。" );
+            }
+            const int32_t type = ParseInt32(parts[4]);
+            const std::vector<BYTE> data = Base64DecodeBytes(parts[5]);
+            if (type < 0 || (parts[3] == "0" && (type != 0 || !data.empty())) ||
+                (parts[3] == "1" && type == 0)) {
+                throw AppError(L"Windows 11 升级备份值类型无效。" );
+            }
+            result[i] = RawRegistryState{allowed, parts[3] == "1", static_cast<DWORD>(type), data};
+        }
+        for (const PolicyValue& policy : kPolicies) {
+            bool found = false;
+            for (const RawRegistryState& state : result) if (state.policy == &policy) found = true;
+            if (!found) throw AppError(L"Windows 11 升级备份缺少必要项目。" );
+        }
+        return result;
+    }
+
+    static void RestoreStates(const std::array<RawRegistryState, 3>& states) {
+        for (const RawRegistryState& state : states) RestoreRawRegistryState(state);
+    }
+
+    static void VerifyStates(const std::array<RawRegistryState, 3>& states) {
+        for (const RawRegistryState& state : states) VerifyRawRegistryState(state);
+    }
+
+    static void ApplyTarget(const Windows10VersionInfo& version) {
+        const RawRegistryState product = MakeRegistryStringState(kPolicies[0], L"Windows 10");
+        SetRawRegistryState(product); VerifyRawRegistryState(product);
+        const RawRegistryState target = MakeRegistryDwordState(kPolicies[1], 1);
+        SetRawRegistryState(target); VerifyRawRegistryState(target);
+        const RawRegistryState info = MakeRegistryStringState(kPolicies[2], version.functionalVersion);
+        SetRawRegistryState(info); VerifyRawRegistryState(info);
+    }
+
+    static std::wstring TryRestore(const std::array<RawRegistryState, 3>& states) {
+        try { RestoreStates(states); VerifyStates(states); return std::wstring(); }
+        catch (const AppError& error) { return error.message; }
+        catch (...) { return L"回滚时发生未预期的原生运行时错误。"; }
+    }
+
+    static OperationResult BlockFailure(const std::array<RawRegistryState, 3>& before,
+        const std::wstring& error) {
+        const std::wstring rollback = TryRestore(before);
+        return rollback.empty()
+            ? OperationResult{OperationOutcome::Failed, L"Windows 11 升级锁定未完成，已恢复到操作前状态：\r\n" + error}
+            : OperationResult{OperationOutcome::PartialSuccess,
+                L"Windows 11 升级锁定失败且回滚不完整。\r\n原始错误：" + error +
+                L"\r\n回滚错误：" + rollback};
+    }
+
+    static OperationResult RestoreFailure(const std::array<RawRegistryState, 3>& before,
+        const std::wstring& error) {
+        const std::wstring rollback = TryRestore(before);
+        return rollback.empty()
+            ? OperationResult{OperationOutcome::Failed, L"Windows 11 升级恢复失败，已返回到本次操作前状态：\r\n" + error}
+            : OperationResult{OperationOutcome::PartialSuccess,
+                L"Windows 11 升级恢复失败且回滚不完整。\r\n原始错误：" + error +
+                L"\r\n回滚错误：" + rollback};
+    }
+};
+
+const std::array<PolicyValue, 3> Windows11UpgradeBlocker::kPolicies = {{
+    {kWindowsUpdate, L"ProductVersion"},
+    {kWindowsUpdate, L"TargetReleaseVersion"},
+    {kWindowsUpdate, L"TargetReleaseVersionInfo"}
+}};
+
 struct UiContext {
     std::unique_ptr<IUpdateController> controller;
+    Windows11UpgradeBlocker upgradeBlocker;
+    VersionInfo version{};
     HWND system = nullptr;
     HWND description = nullptr;
     HWND status = nullptr;
     HWND details = nullptr;
     HWND disableButton = nullptr;
     HWND restoreButton = nullptr;
+    HWND upgradeStatus = nullptr;
+    HWND upgradeDetails = nullptr;
+    HWND upgradeDisableButton = nullptr;
+    HWND upgradeRestoreButton = nullptr;
     HWND warning = nullptr;
     HFONT normalFont = nullptr;
     HFONT titleFont = nullptr;
     HFONT statusFont = nullptr;
     HBRUSH backgroundBrush = nullptr;
     HBRUSH statusBrush = nullptr;
+    HBRUSH upgradeBrush = nullptr;
     HBRUSH warningBrush = nullptr;
     COLORREF statusColor = RGB(0, 120, 70);
+    COLORREF upgradeStatusColor = RGB(0, 120, 70);
     int dpi = 96;
 };
 
@@ -968,7 +1484,7 @@ void FillRoundedPanel(HDC dc, const RECT& rect, COLORREF fill, COLORREF border,
 void DrawOwnerButton(const DRAWITEMSTRUCT& item) {
     wchar_t text[160] = {};
     GetWindowTextW(item.hwndItem, text, static_cast<int>(std::size(text)));
-    const bool primary = item.CtlID == IDC_DISABLE;
+    const bool primary = item.CtlID == IDC_DISABLE || item.CtlID == IDC_UPGRADE_DISABLE;
     const bool disabled = (item.itemState & ODS_DISABLED) != 0;
     const bool pressed = (item.itemState & ODS_SELECTED) != 0;
     COLORREF fill = primary ? RGB(20, 112, 194) : RGB(255, 255, 255);
@@ -1010,6 +1526,23 @@ std::wstring JoinDetails(const std::vector<std::wstring>& details) {
     return result;
 }
 
+std::wstring BuildSystemLabel(const VersionInfo& version, const std::wstring& displayName) {
+    std::wstring result = L"当前系统：" + displayName;
+    if (version.major == 10 && version.minor == 0 && version.build < 22000) {
+        try {
+            const Windows10VersionInfo detected = Windows10VersionDetector::Detect(version);
+            if (detected.known) {
+                result += L"  功能版本：" + detected.functionalVersion;
+                if (detected.source == Windows10VersionSource::BuildMapping) result += L"（根据 Build 识别）";
+            }
+        } catch (const AppError&) {
+            // Keep startup usable; the upgrade panel reports detailed detection errors.
+        }
+    }
+    result += L"  Build：" + std::to_wstring(version.build);
+    return result;
+}
+
 void RefreshUi(HWND window, UiContext& ui) {
     (void)window;
     try {
@@ -1026,6 +1559,25 @@ void RefreshUi(HWND window, UiContext& ui) {
         ui.statusColor = RGB(170, 38, 38);
         EnableWindow(ui.restoreButton, ui.controller->CanRestore() ? TRUE : FALSE);
         InvalidateRect(ui.status, nullptr, TRUE);
+    }
+
+    try {
+        const UpdateStatus status = ui.upgradeBlocker.GetStatus(ui.version);
+        SetWindowTextW(ui.upgradeStatus, status.title.c_str());
+        SetWindowTextW(ui.upgradeDetails, JoinDetails(status.details).c_str());
+        ui.upgradeStatusColor = status.level == StatusLevel::Disabled ? RGB(0, 120, 70) :
+            status.level == StatusLevel::PartiallyDisabled ? RGB(184, 108, 0) : RGB(38, 91, 135);
+        EnableWindow(ui.upgradeDisableButton,
+            ui.version.major == 10 && ui.version.minor == 0 && ui.version.build < 22000);
+        EnableWindow(ui.upgradeRestoreButton, ui.upgradeBlocker.CanRestore(ui.version) ? TRUE : FALSE);
+        InvalidateRect(ui.upgradeStatus, nullptr, TRUE);
+    } catch (const AppError& error) {
+        SetWindowTextW(ui.upgradeStatus, L"Windows 11 升级状态：读取失败");
+        SetWindowTextW(ui.upgradeDetails, error.message.c_str());
+        ui.upgradeStatusColor = RGB(170, 38, 38);
+        EnableWindow(ui.upgradeDisableButton, FALSE);
+        EnableWindow(ui.upgradeRestoreButton, FALSE);
+        InvalidateRect(ui.upgradeStatus, nullptr, TRUE);
     }
 }
 
@@ -1051,8 +1603,9 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
         ui->dpi = dpi;
         ui->backgroundBrush = CreateSolidBrush(RGB(246, 248, 251));
         ui->statusBrush = CreateSolidBrush(RGB(244, 250, 247));
+        ui->upgradeBrush = CreateSolidBrush(RGB(244, 248, 252));
         ui->warningBrush = CreateSolidBrush(RGB(255, 249, 235));
-        if (!ui->backgroundBrush || !ui->statusBrush || !ui->warningBrush) {
+        if (!ui->backgroundBrush || !ui->statusBrush || !ui->upgradeBrush || !ui->warningBrush) {
             ThrowWin32(L"创建界面画刷");
         }
         const auto scale = [dpi](int value) { return ScaleForDpi(value, dpi); };
@@ -1070,7 +1623,7 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
             scale(30), scale(21), scale(435), scale(39), window, nullptr, nullptr, nullptr);
         HWND author = CreateWindowExW(0, L"STATIC", L"作者：啊常用户", WS_CHILD | WS_VISIBLE | SS_RIGHT,
             scale(465), scale(30), scale(140), scale(24), window, nullptr, nullptr, nullptr);
-        ui->system = CreateWindowExW(0, L"STATIC", (L"当前系统：" + ui->controller->DisplayName()).c_str(), WS_CHILD | WS_VISIBLE,
+        ui->system = CreateWindowExW(0, L"STATIC", BuildSystemLabel(ui->version, ui->controller->DisplayName()).c_str(), WS_CHILD | WS_VISIBLE,
             scale(34), scale(68), scale(570), scale(24), window, reinterpret_cast<HMENU>(IDC_SYSTEM), nullptr, nullptr);
         ui->description = CreateWindowExW(0, L"STATIC", ui->controller->Description().c_str(), WS_CHILD | WS_VISIBLE,
             scale(34), scale(96), scale(570), scale(46), window, reinterpret_cast<HMENU>(IDC_DESCRIPTION), nullptr, nullptr);
@@ -1084,12 +1637,28 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
         ui->restoreButton = CreateWindowExW(0, L"BUTTON", L"恢复到运行本软件前的状态",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(332), scale(334), scale(282), scale(52),
             window, reinterpret_cast<HMENU>(IDC_RESTORE), nullptr, nullptr);
-        ui->warning = CreateWindowExW(0, L"STATIC", ui->controller->Warning().c_str(), WS_CHILD | WS_VISIBLE,
-            scale(42), scale(420), scale(555), scale(50), window, reinterpret_cast<HMENU>(IDC_WARNING), nullptr, nullptr);
+        HWND upgradeLabel = CreateWindowExW(0, L"STATIC", L"Windows 11 升级控制", WS_CHILD | WS_VISIBLE,
+            scale(34), scale(397), scale(570), scale(24), window, nullptr, nullptr, nullptr);
+        ui->upgradeStatus = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+            scale(46), scale(424), scale(550), scale(30), window, reinterpret_cast<HMENU>(IDC_UPGRADE_STATUS), nullptr, nullptr);
+        ui->upgradeDetails = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+            scale(46), scale(458), scale(550), scale(65), window, reinterpret_cast<HMENU>(IDC_UPGRADE_DETAILS), nullptr, nullptr);
+        ui->upgradeDisableButton = CreateWindowExW(0, L"BUTTON", ui->upgradeBlocker.BlockButtonText().c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(26), scale(530), scale(282), scale(52),
+            window, reinterpret_cast<HMENU>(IDC_UPGRADE_DISABLE), nullptr, nullptr);
+        ui->upgradeRestoreButton = CreateWindowExW(0, L"BUTTON", ui->upgradeBlocker.RestoreButtonText().c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(332), scale(530), scale(282), scale(52),
+            window, reinterpret_cast<HMENU>(IDC_UPGRADE_RESTORE), nullptr, nullptr);
+        const std::wstring warningText = ui->controller->Warning() + L"\r\n" + ui->upgradeBlocker.Warning();
+        ui->warning = CreateWindowExW(0, L"STATIC", warningText.c_str(), WS_CHILD | WS_VISIBLE,
+            scale(42), scale(608), scale(555), scale(100), window, reinterpret_cast<HMENU>(IDC_WARNING), nullptr, nullptr);
         for (HWND control : {title, author, ui->system, ui->description, ui->details,
-             ui->disableButton, ui->restoreButton, ui->warning}) SetControlFont(control, ui->normalFont);
+             ui->disableButton, ui->restoreButton, upgradeLabel, ui->upgradeDetails,
+             ui->upgradeDisableButton, ui->upgradeRestoreButton, ui->warning}) SetControlFont(control, ui->normalFont);
         SetControlFont(title, ui->titleFont);
         SetControlFont(ui->status, ui->statusFont);
+        SetControlFont(upgradeLabel, ui->statusFont);
+        SetControlFont(ui->upgradeStatus, ui->statusFont);
         RefreshUi(window, *ui);
         return 0;
     }
@@ -1103,8 +1672,10 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
         if (ui) {
             const auto scale = [ui](int value) { return ScaleForDpi(value, ui->dpi); };
             RECT statusPanel = {scale(26), scale(153), scale(614), scale(313)};
-            RECT warningPanel = {scale(26), scale(408), scale(614), scale(482)};
+            RECT upgradePanel = {scale(26), scale(386), scale(614), scale(594)};
+            RECT warningPanel = {scale(26), scale(594), scale(614), scale(718)};
             FillRoundedPanel(dc, statusPanel, RGB(244, 250, 247), RGB(211, 225, 216), scale(12));
+            FillRoundedPanel(dc, upgradePanel, RGB(244, 248, 252), RGB(208, 220, 234), scale(12));
             FillRoundedPanel(dc, warningPanel, RGB(255, 249, 235), RGB(238, 218, 169), scale(12));
         }
         EndPaint(window, &paint);
@@ -1116,6 +1687,7 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
             const std::wstring prompt = ui->controller->Confirmation() + L"\r\n\r\n是否继续？";
             if (MessageBoxW(window, prompt.c_str(), L"确认关闭更新", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return 0;
             EnableWindow(ui->disableButton, FALSE); EnableWindow(ui->restoreButton, FALSE);
+            EnableWindow(ui->upgradeDisableButton, FALSE); EnableWindow(ui->upgradeRestoreButton, FALSE);
             try {
                 const OperationResult result = ui->controller->Disable();
                 ShowOperationResult(window, result);
@@ -1129,6 +1701,7 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
             if (MessageBoxW(window, L"这会恢复本软件第一次修改前保存的原始状态。\r\n\r\n是否继续？",
                 L"确认恢复", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return 0;
             EnableWindow(ui->disableButton, FALSE); EnableWindow(ui->restoreButton, FALSE);
+            EnableWindow(ui->upgradeDisableButton, FALSE); EnableWindow(ui->upgradeRestoreButton, FALSE);
             try {
                 const OperationResult result = ui->controller->Restore();
                 ShowOperationResult(window, result);
@@ -1138,9 +1711,43 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
             RefreshUi(window, *ui);
             EnableWindow(ui->disableButton, TRUE); return 0;
         }
+        if (LOWORD(wParam) == IDC_UPGRADE_DISABLE && HIWORD(wParam) == BN_CLICKED) {
+            const std::wstring prompt = ui->upgradeBlocker.Confirmation() + L"\r\n\r\n是否继续？";
+            if (MessageBoxW(window, prompt.c_str(), L"确认禁止升级到 Windows 11",
+                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return 0;
+            EnableWindow(ui->disableButton, FALSE); EnableWindow(ui->restoreButton, FALSE);
+            EnableWindow(ui->upgradeDisableButton, FALSE); EnableWindow(ui->upgradeRestoreButton, FALSE);
+            try {
+                const OperationResult result = ui->upgradeBlocker.Block(ui->version);
+                ShowOperationResult(window, result);
+            } catch (...) {
+                MessageBoxW(window, L"发生未预期错误。操作未能完成，请重新检查当前状态。",
+                    L"操作失败", MB_OK | MB_ICONERROR);
+            }
+            RefreshUi(window, *ui);
+            EnableWindow(ui->disableButton, TRUE); return 0;
+        }
+        if (LOWORD(wParam) == IDC_UPGRADE_RESTORE && HIWORD(wParam) == BN_CLICKED) {
+            if (MessageBoxW(window,
+                L"这会恢复 Windows 11 升级策略到本软件第一次修改前的原始状态。\r\n\r\n是否继续？",
+                L"确认恢复 Windows 11 升级允许状态",
+                MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return 0;
+            EnableWindow(ui->disableButton, FALSE); EnableWindow(ui->restoreButton, FALSE);
+            EnableWindow(ui->upgradeDisableButton, FALSE); EnableWindow(ui->upgradeRestoreButton, FALSE);
+            try {
+                const OperationResult result = ui->upgradeBlocker.Restore(ui->version);
+                ShowOperationResult(window, result);
+            } catch (...) {
+                MessageBoxW(window, L"发生未预期错误。恢复未能完成，请重新检查当前状态。",
+                    L"操作失败", MB_OK | MB_ICONERROR);
+            }
+            RefreshUi(window, *ui);
+            EnableWindow(ui->disableButton, TRUE); return 0;
+        }
         break;
     case WM_DRAWITEM:
-        if (ui && (wParam == IDC_DISABLE || wParam == IDC_RESTORE)) {
+        if (ui && (wParam == IDC_DISABLE || wParam == IDC_RESTORE ||
+            wParam == IDC_UPGRADE_DISABLE || wParam == IDC_UPGRADE_RESTORE)) {
             DrawOwnerButton(*reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
             return TRUE;
         }
@@ -1154,6 +1761,11 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
                 SetTextColor(dc, control == ui->status ? ui->statusColor : RGB(48, 61, 73));
                 SetBkColor(dc, RGB(244, 250, 247));
                 return reinterpret_cast<LRESULT>(ui->statusBrush);
+            }
+            if (control == ui->upgradeStatus || control == ui->upgradeDetails) {
+                SetTextColor(dc, control == ui->upgradeStatus ? ui->upgradeStatusColor : RGB(48, 61, 73));
+                SetBkColor(dc, RGB(244, 248, 252));
+                return reinterpret_cast<LRESULT>(ui->upgradeBrush);
             }
             if (control == ui->warning) {
                 SetTextColor(dc, RGB(133, 78, 0));
@@ -1172,6 +1784,7 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
             if (ui->statusFont) DeleteObject(ui->statusFont);
             if (ui->backgroundBrush) DeleteObject(ui->backgroundBrush);
             if (ui->statusBrush) DeleteObject(ui->statusBrush);
+            if (ui->upgradeBrush) DeleteObject(ui->upgradeBrush);
             if (ui->warningBrush) DeleteObject(ui->warningBrush);
         }
         PostQuitMessage(0); return 0;
@@ -1223,12 +1836,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         CoUninitialize(); return 1;
     }
     if (mutexError == ERROR_ALREADY_EXISTS) {
-        MessageBoxW(nullptr, L"Win7/10/11 自动更新关闭工具已在运行。请关闭另一个窗口后再试。", kAppName, MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(nullptr, L"更新控制工具已在运行。请关闭另一个窗口后再试。", kAppName, MB_OK | MB_ICONINFORMATION);
         CoUninitialize(); return 0;
     }
     try {
         UiContext ui;
-        ui.controller = CreateController(ReadWindowsVersion());
+        ui.version = ReadWindowsVersion();
+        ui.controller = CreateController(ui.version);
         INITCOMMONCONTROLSEX controls = {sizeof(controls), ICC_STANDARD_CLASSES};
         InitCommonControlsEx(&controls);
         WNDCLASSEXW wc = {sizeof(wc)};
@@ -1244,7 +1858,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         if (!screenDc) ThrowWin32(L"读取屏幕 DPI");
         const int windowDpi = GetDeviceCaps(screenDc, LOGPIXELSY);
         ReleaseDC(nullptr, screenDc);
-        RECT rect = {0, 0, ScaleForDpi(640, windowDpi), ScaleForDpi(500, windowDpi)};
+        RECT rect = {0, 0, ScaleForDpi(640, windowDpi), ScaleForDpi(730, windowDpi)};
         AdjustWindowRectEx(&rect, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, 0);
         HWND window = CreateWindowExW(0, wc.lpszClassName, kAppName,
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,

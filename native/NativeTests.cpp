@@ -32,6 +32,60 @@ int wmain() {
         Require(ParseInt32("  +42 ") == 42 && ParseInt32("-2147483648") == INT32_MIN,
             L"旧 C# Int32 文本兼容解析错误。" );
 
+        const VersionInfo win10_22h2{10, 0, 19045, VER_NT_WORKSTATION};
+        const Windows10VersionInfo displayVersion = Windows10VersionDetector::Resolve(
+            win10_22h2, L"22H2", L"2004", 4046);
+        Require(displayVersion.isWindows10 && displayVersion.known &&
+            displayVersion.functionalVersion == L"22H2" &&
+            displayVersion.source == Windows10VersionSource::DisplayVersion,
+            L"DisplayVersion 版本识别错误。" );
+
+        const Windows10VersionInfo releaseVersion = Windows10VersionDetector::Resolve(
+            VersionInfo{10, 0, 18363, VER_NT_WORKSTATION}, L"", L"1909", 844);
+        Require(releaseVersion.known && releaseVersion.functionalVersion == L"1909" &&
+            releaseVersion.source == Windows10VersionSource::ReleaseId,
+            L"ReleaseId 版本兜底错误。" );
+
+        const Windows10VersionInfo invalidDisplayReleaseVersion = Windows10VersionDetector::Resolve(
+            VersionInfo{10, 0, 18363, VER_NT_WORKSTATION}, L"not-a-version", L"1909", 844);
+        Require(invalidDisplayReleaseVersion.known &&
+            invalidDisplayReleaseVersion.functionalVersion == L"1909" &&
+            invalidDisplayReleaseVersion.source == Windows10VersionSource::ReleaseId,
+            L"DisplayVersion 异常时未使用 ReleaseId 兜底。" );
+
+        for (const Windows10BuildMapping& mapping : kWindows10BuildMappings) {
+            const Windows10VersionInfo mapped = Windows10VersionDetector::Resolve(
+                VersionInfo{10, 0, mapping.build, VER_NT_WORKSTATION}, L"", L"", 1);
+            Require(mapped.known && mapped.functionalVersion == mapping.functionalVersion &&
+                mapped.source == Windows10VersionSource::BuildMapping,
+                L"Build 映射表存在未覆盖项。" );
+        }
+
+        const Windows10VersionInfo mismatchedVersion = Windows10VersionDetector::Resolve(
+            VersionInfo{10, 0, 18363, VER_NT_WORKSTATION}, L"22H2", L"1909", 418);
+        Require(mismatchedVersion.known && mismatchedVersion.functionalVersion == L"1909" &&
+            mismatchedVersion.source == Windows10VersionSource::BuildMapping,
+            L"DisplayVersion 与真实 Build 冲突时未使用 Build 映射。" );
+
+        const Windows10VersionInfo unknownVersion = Windows10VersionDetector::Resolve(
+            VersionInfo{10, 0, 19046, VER_NT_WORKSTATION}, L"22H2", L"", 1);
+        Require(unknownVersion.isWindows10 && !unknownVersion.known && !unknownVersion.error.empty(),
+            L"未知 Windows 10 Build 未被拒绝。" );
+
+        const UpdateStatus upgradeAllowed = Windows11UpgradeBlocker::TestBuildStatus(
+            displayVersion, false, false, false, false, L"");
+        const UpdateStatus upgradeBlocked = Windows11UpgradeBlocker::TestBuildStatus(
+            displayVersion, true, true, true, true, L"22H2");
+        const UpdateStatus upgradeMismatch = Windows11UpgradeBlocker::TestBuildStatus(
+            displayVersion, true, true, true, false, L"21H2");
+        const UpdateStatus upgradePartial = Windows11UpgradeBlocker::TestBuildStatus(
+            displayVersion, true, true, false, false, L"");
+        Require(upgradeAllowed.title == L"Windows 11 升级状态：允许" &&
+            upgradeBlocked.title == L"Windows 11 升级状态：已阻止" &&
+            upgradeMismatch.title == L"Windows 11 升级状态：目标版本与当前系统不一致" &&
+            upgradePartial.title == L"Windows 11 升级状态：部分配置",
+            L"upgrade-status" );
+
         const UpdateStatus all = ModernUpdateController::BuildStatus(true, true, true, true, true);
         const UpdateStatus partial = ModernUpdateController::BuildStatus(true, true, true, true, false);
         const UpdateStatus coreFailed = ModernUpdateController::BuildStatus(false, true, true, true, true);
@@ -60,6 +114,34 @@ int wmain() {
 
         modern.TestSetAccessBackupPath(testDirectory + L"\\windows-update-access-backup-v1.txt");
         RemoveIfPresent(modern.TestAccessBackupPath());
+
+        Windows11UpgradeBlocker upgradeBlocker;
+        upgradeBlocker.TestSetBackupPath(testDirectory + L"\\windows11-upgrade-backup-v1.txt");
+        RemoveIfPresent(upgradeBlocker.TestBackupPath());
+        const std::vector<BYTE> originalStringBytes = {
+            'o', 0, 'l', 0, 'd', 0, 0, 0};
+        WriteUtf8LinesAtomically(upgradeBlocker.TestBackupPath(), {
+            "UpdateLock-Windows11Upgrade|1",
+            "RAW|" + Base64Encode(kWindowsUpdate) + "|" + Base64Encode(L"ProductVersion") + "|1|1|" +
+                Base64EncodeBytes(originalStringBytes),
+            "RAW|" + Base64Encode(kWindowsUpdate) + "|" + Base64Encode(L"TargetReleaseVersion") + "|1|4|" +
+                Base64EncodeBytes(std::vector<BYTE>{7, 0, 0, 0}),
+            "RAW|" + Base64Encode(kWindowsUpdate) + "|" + Base64Encode(L"TargetReleaseVersionInfo") + "|0|0|"}, true);
+        const std::array<RawRegistryState, 3> upgradeBackup = upgradeBlocker.TestReadBackup();
+        Require(upgradeBackup[0].exists && upgradeBackup[0].type == REG_SZ &&
+            upgradeBackup[0].data == originalStringBytes && upgradeBackup[1].type == REG_DWORD &&
+            upgradeBackup[1].data == std::vector<BYTE>({7, 0, 0, 0}) && !upgradeBackup[2].exists,
+            L"upgrade-backup" );
+        RemoveIfPresent(upgradeBlocker.TestBackupPath());
+
+        const OperationResult win7BlockAttempt = upgradeBlocker.Block(
+            VersionInfo{6, 1, 7601, VER_NT_WORKSTATION});
+        const OperationResult win11RestoreAttempt = upgradeBlocker.Restore(
+            VersionInfo{10, 0, 22000, VER_NT_WORKSTATION});
+        Require(win7BlockAttempt.outcome == OperationOutcome::Failed &&
+            win11RestoreAttempt.outcome == OperationOutcome::Failed &&
+            !FileExists(upgradeBlocker.TestBackupPath()),
+            L"upgrade-zero-write" );
         WriteUtf8LinesAtomically(modern.TestAccessBackupPath(), {
             "UpdateLock-ModernAccess|1",
             Base64Encode(kWindowsUpdate) + "|" + Base64Encode(L"SetDisableUXWUAccess") + "|0|9"}, true);
