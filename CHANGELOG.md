@@ -1,12 +1,14 @@
 # 版本说明
 
-## 未发布
+## 3.0.0
 
+- 统一程序名称为“Win7/10/11自动更新关闭3.0工具”，文件版本更新为 `3.0.0.0`。
 - 新增仅适用于 Windows 10 的“禁止升级到 Windows 11”与独立恢复功能。
 - 自动识别当前真实 Windows 10 功能版本，按 Build、`DisplayVersion`、`ReleaseId` 交叉校验；未知 Build 拒绝写入。
 - 新功能仅写入 `ProductVersion`、`TargetReleaseVersion`、`TargetReleaseVersionInfo`，不改动现有自动更新策略或服务控制。
 - 新增独立备份 `%ProgramData%\UpdateLock\windows11-upgrade-backup-v1.txt`，保留原始存在性、类型和值，恢复成功后才删除备份。
 - Windows 7 和 Windows 11 上新功能按钮灰显，底层调用同样零写入。
+- 界面删除重复的“Windows 11 升级控制”标题，直接显示“Windows 11 升级状态”。
 
 ## 2.1.0
 

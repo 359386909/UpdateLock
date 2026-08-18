@@ -25,7 +25,7 @@
 
 namespace {
 
-const wchar_t* const kAppName = L"Win7/10/11 自动更新关闭工具";
+const wchar_t* const kAppName = L"Win7/10/11自动更新关闭3.0工具";
 const wchar_t* const kMutexName = L"Global\\UpdateLock.SingleInstance.7A64EA9A";
 const wchar_t* const kWindowsUpdate = L"SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate";
 const wchar_t* const kAutomaticUpdates = L"SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU";
@@ -1637,27 +1637,24 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
         ui->restoreButton = CreateWindowExW(0, L"BUTTON", L"恢复到运行本软件前的状态",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(332), scale(334), scale(282), scale(52),
             window, reinterpret_cast<HMENU>(IDC_RESTORE), nullptr, nullptr);
-        HWND upgradeLabel = CreateWindowExW(0, L"STATIC", L"Windows 11 升级控制", WS_CHILD | WS_VISIBLE,
-            scale(34), scale(397), scale(570), scale(24), window, nullptr, nullptr, nullptr);
         ui->upgradeStatus = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-            scale(46), scale(424), scale(550), scale(30), window, reinterpret_cast<HMENU>(IDC_UPGRADE_STATUS), nullptr, nullptr);
+            scale(46), scale(397), scale(550), scale(30), window, reinterpret_cast<HMENU>(IDC_UPGRADE_STATUS), nullptr, nullptr);
         ui->upgradeDetails = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-            scale(46), scale(458), scale(550), scale(65), window, reinterpret_cast<HMENU>(IDC_UPGRADE_DETAILS), nullptr, nullptr);
+            scale(46), scale(431), scale(550), scale(65), window, reinterpret_cast<HMENU>(IDC_UPGRADE_DETAILS), nullptr, nullptr);
         ui->upgradeDisableButton = CreateWindowExW(0, L"BUTTON", ui->upgradeBlocker.BlockButtonText().c_str(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(26), scale(530), scale(282), scale(52),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(26), scale(503), scale(282), scale(52),
             window, reinterpret_cast<HMENU>(IDC_UPGRADE_DISABLE), nullptr, nullptr);
         ui->upgradeRestoreButton = CreateWindowExW(0, L"BUTTON", ui->upgradeBlocker.RestoreButtonText().c_str(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(332), scale(530), scale(282), scale(52),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(332), scale(503), scale(282), scale(52),
             window, reinterpret_cast<HMENU>(IDC_UPGRADE_RESTORE), nullptr, nullptr);
         const std::wstring warningText = ui->controller->Warning() + L"\r\n" + ui->upgradeBlocker.Warning();
         ui->warning = CreateWindowExW(0, L"STATIC", warningText.c_str(), WS_CHILD | WS_VISIBLE,
-            scale(42), scale(608), scale(555), scale(100), window, reinterpret_cast<HMENU>(IDC_WARNING), nullptr, nullptr);
+            scale(42), scale(580), scale(555), scale(124), window, reinterpret_cast<HMENU>(IDC_WARNING), nullptr, nullptr);
         for (HWND control : {title, author, ui->system, ui->description, ui->details,
-             ui->disableButton, ui->restoreButton, upgradeLabel, ui->upgradeDetails,
+             ui->disableButton, ui->restoreButton, ui->upgradeDetails,
              ui->upgradeDisableButton, ui->upgradeRestoreButton, ui->warning}) SetControlFont(control, ui->normalFont);
         SetControlFont(title, ui->titleFont);
         SetControlFont(ui->status, ui->statusFont);
-        SetControlFont(upgradeLabel, ui->statusFont);
         SetControlFont(ui->upgradeStatus, ui->statusFont);
         RefreshUi(window, *ui);
         return 0;
@@ -1672,8 +1669,8 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
         if (ui) {
             const auto scale = [ui](int value) { return ScaleForDpi(value, ui->dpi); };
             RECT statusPanel = {scale(26), scale(153), scale(614), scale(313)};
-            RECT upgradePanel = {scale(26), scale(386), scale(614), scale(594)};
-            RECT warningPanel = {scale(26), scale(594), scale(614), scale(718)};
+            RECT upgradePanel = {scale(26), scale(386), scale(614), scale(567)};
+            RECT warningPanel = {scale(26), scale(567), scale(614), scale(718)};
             FillRoundedPanel(dc, statusPanel, RGB(244, 250, 247), RGB(211, 225, 216), scale(12));
             FillRoundedPanel(dc, upgradePanel, RGB(244, 248, 252), RGB(208, 220, 234), scale(12));
             FillRoundedPanel(dc, warningPanel, RGB(255, 249, 235), RGB(238, 218, 169), scale(12));

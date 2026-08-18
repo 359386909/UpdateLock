@@ -1,4 +1,4 @@
-# Win7/10/11 自动更新关闭工具
+# Win7/10/11自动更新关闭3.0工具
 
 一个原生 C++/Win32 单文件工具，自动识别 Windows 7、Windows 10 或 Windows 11，并使用对应策略关闭 Windows Update。
 
@@ -87,11 +87,13 @@ build-native.cmd
 
 构建输出位于 `native\build`。脚本同时生成 `UpdateLock.exe` 和只使用临时目录的原生测试程序。
 
+发布包只分发一个文件：`Win7-10-11自动更新关闭3.0工具.exe`。`NativeTests.exe`、目标文件和资源文件均不放入发布包。
+
 ## 下载与校验
 
 普通用户请从 GitHub Releases 下载单文件 EXE，并使用 Release 中公布的 SHA-256 校验文件完整性。
 
-当前 EXE 的作者元数据为“啊常用户”，但尚未使用受信任的 Authenticode 证书签名，因此 Windows 仍可能提示“未知发布者”或显示 SmartScreen 警告。
+当前 3.0 EXE 的作者元数据为“啊常用户”，但尚未使用受信任的 Authenticode 证书签名，因此 Windows 仍可能提示“未知发布者”或显示 SmartScreen 警告。
 
 ## 验证边界
 
