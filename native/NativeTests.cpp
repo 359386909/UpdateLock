@@ -13,6 +13,19 @@ void RemoveIfPresent(const std::wstring& path) {
     if (!DeleteFileW(path.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND) ThrowWin32(L"删除测试文件");
 }
 
+RECT ChildClientRect(HWND parent, int controlId) {
+    HWND child = GetDlgItem(parent, controlId);
+    if (!child) throw AppError(L"界面布局测试缺少控件。" );
+    RECT rect = {};
+    if (!GetWindowRect(child, &rect)) ThrowWin32(L"读取界面控件位置");
+    POINT points[2] = {{rect.left, rect.top}, {rect.right, rect.bottom}};
+    if (!MapWindowPoints(HWND_DESKTOP, parent, points, 2)) {
+        const DWORD error = GetLastError();
+        if (error != ERROR_SUCCESS) ThrowWin32(L"转换界面控件位置", error);
+    }
+    return RECT{points[0].x, points[0].y, points[1].x, points[1].y};
+}
+
 } // namespace
 
 int wmain() {
@@ -72,6 +85,19 @@ int wmain() {
         Require(unknownVersion.isWindows10 && !unknownVersion.known && !unknownVersion.error.empty(),
             L"未知 Windows 10 Build 未被拒绝。" );
 
+        const VersionInfo server2016{10, 0, 14393, VER_NT_SERVER};
+        const Windows10VersionInfo serverVersion = Windows10VersionDetector::Resolve(
+            server2016, L"1607", L"1607", 1);
+        Require(IsWindowsServer2016(server2016) && !serverVersion.isWindows10,
+            L"Windows Server 2016 与 Windows 10 桌面版本未正确隔离。" );
+        std::unique_ptr<IUpdateController> serverController = CreateController(server2016);
+        Require(serverController->DisplayName() == L"Windows Server 2016",
+            L"Windows Server 2016 Controller 路由错误。" );
+        bool server2019Rejected = false;
+        try { (void)CreateController(VersionInfo{10, 0, 17763, VER_NT_SERVER}); }
+        catch (const AppError&) { server2019Rejected = true; }
+        Require(server2019Rejected, L"未验证的 Windows Server 版本不应被静默放行。" );
+
         const UpdateStatus upgradeAllowed = Windows11UpgradeBlocker::TestBuildStatus(
             displayVersion, false, false, false, false, L"");
         const UpdateStatus upgradeBlocked = Windows11UpgradeBlocker::TestBuildStatus(
@@ -89,9 +115,18 @@ int wmain() {
         const UpdateStatus all = ModernUpdateController::BuildStatus(true, true, true, true, true);
         const UpdateStatus partial = ModernUpdateController::BuildStatus(true, true, true, true, false);
         const UpdateStatus coreFailed = ModernUpdateController::BuildStatus(false, true, true, true, true);
-        Require(all.level == StatusLevel::Disabled && all.title == L"Windows 更新已完全关闭", L"现代完整状态语义错误。" );
-        Require(partial.level == StatusLevel::PartiallyDisabled && partial.title == L"Windows 自动更新已关闭，但部分封锁策略未生效", L"现代访问封锁状态语义错误。" );
-        Require(coreFailed.level == StatusLevel::Enabled && coreFailed.title == L"Windows 更新未完全关闭", L"现代核心状态语义错误。" );
+        const UpdateStatus serverAll = ModernUpdateController::BuildStatus(true, false, true, true, true, false);
+        Require(all.level == StatusLevel::Disabled && all.title == L"√ Windows 更新已完全关闭" &&
+            all.details[0].find(L"√ 自动更新") == 0, L"现代完整状态语义错误。" );
+        Require(partial.level == StatusLevel::PartiallyDisabled &&
+            partial.title == L"× Windows 自动更新已关闭，但部分封锁策略未生效" &&
+            partial.details[2].find(L"× Windows Update 手动访问") == 0,
+            L"现代访问封锁状态语义错误。" );
+        Require(coreFailed.level == StatusLevel::Enabled && coreFailed.title == L"× Windows 更新未完全关闭" &&
+            coreFailed.details[0].find(L"× 自动更新") == 0, L"现代核心状态语义错误。" );
+        Require(serverAll.level == StatusLevel::Disabled &&
+            serverAll.details[0].find(L"更新通知：当前系统不适用") != std::wstring::npos,
+            L"Windows Server 2016 不适用的通知策略被错误计入状态。" );
 
         ModernUpdateController modern(L"Windows 10");
         modern.TestSetBackupPath(testDirectory + L"\\policy-backup-v1.txt");
@@ -136,9 +171,11 @@ int wmain() {
 
         const OperationResult win7BlockAttempt = upgradeBlocker.Block(
             VersionInfo{6, 1, 7601, VER_NT_WORKSTATION});
+        const OperationResult serverBlockAttempt = upgradeBlocker.Block(server2016);
         const OperationResult win11RestoreAttempt = upgradeBlocker.Restore(
             VersionInfo{10, 0, 22000, VER_NT_WORKSTATION});
         Require(win7BlockAttempt.outcome == OperationOutcome::Failed &&
+            serverBlockAttempt.outcome == OperationOutcome::Failed &&
             win11RestoreAttempt.outcome == OperationOutcome::Failed &&
             !FileExists(upgradeBlocker.TestBackupPath()),
             L"upgrade-zero-write" );
@@ -180,6 +217,34 @@ int wmain() {
         const UpdateStatus liveStatus = current->GetStatus();
         Require(!liveStatus.title.empty() && !liveStatus.details.empty(),
             L"当前系统只读状态检查失败。" );
+
+        UiContext ui;
+        ui.version = currentVersion;
+        ui.controller = CreateController(currentVersion);
+        WNDCLASSEXW windowClass = {sizeof(windowClass)};
+        windowClass.lpfnWndProc = WindowProc;
+        windowClass.hInstance = GetModuleHandleW(nullptr);
+        windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        windowClass.lpszClassName = L"AchangUser.UpdateLock.NativeTests";
+        if (!RegisterClassExW(&windowClass)) ThrowWin32(L"注册界面测试窗口类");
+        HWND testWindow = CreateWindowExW(0, windowClass.lpszClassName, kAppName,
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, 0, 0, 640, 730,
+            nullptr, nullptr, windowClass.hInstance, &ui);
+        if (!testWindow) ThrowWin32(L"创建界面布局测试窗口");
+        const RECT updateDetails = ChildClientRect(testWindow, IDC_DETAILS);
+        const RECT updateButton = ChildClientRect(testWindow, IDC_DISABLE);
+        const RECT upgradeStatusRect = ChildClientRect(testWindow, IDC_UPGRADE_STATUS);
+        const RECT upgradeDetailsRect = ChildClientRect(testWindow, IDC_UPGRADE_DETAILS);
+        const RECT upgradeButton = ChildClientRect(testWindow, IDC_UPGRADE_DISABLE);
+        Require(updateDetails.bottom <= updateButton.top && updateButton.top - updateDetails.bottom <= ScaleForDpi(20, ui.dpi),
+            L"自动更新状态与操作按钮距离过大。" );
+        Require(upgradeStatusRect.top - updateButton.bottom >= ScaleForDpi(35, ui.dpi),
+            L"自动更新与 Windows 11 升级区域分隔不足。" );
+        Require(upgradeDetailsRect.bottom <= upgradeButton.top && upgradeButton.top - upgradeDetailsRect.bottom <= ScaleForDpi(12, ui.dpi),
+            L"Windows 11 升级状态与操作按钮距离过大。" );
+        DestroyWindow(testWindow);
+        UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
         if (!RemoveDirectoryW(testDirectory.c_str())) ThrowWin32(L"删除测试临时目录");
 
         std::wcout << L"ALL_NATIVE_TESTS_PASSED" << std::endl;

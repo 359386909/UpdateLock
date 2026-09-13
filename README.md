@@ -1,11 +1,11 @@
-# Win7/10/11自动更新关闭3.0工具
+# Win7/10/11自动更新关闭3.0.1工具
 
-一个原生 C++/Win32 单文件工具，自动识别 Windows 7、Windows 10 或 Windows 11，并使用对应策略关闭 Windows Update。
+一个原生 C++/Win32 单文件工具，自动识别 Windows 7、Windows 10、Windows 11 或 Windows Server 2016，并使用对应策略关闭 Windows Update。
 
 ## 主要特性
 
 - 原生 Win32 x86 EXE，无 .NET、无额外运行时依赖。
-- 使用 `/MT` 静态 CRT，可在 Win7 SP1、Win10、Win11 上直接运行。
+- 使用 `/MT` 静态 CRT，可在 Win7 SP1、Win10、Win11、Windows Server 2016 上直接运行。
 - 注册表通过 Win32 Registry API 操作；Win7 的 `wuauserv` 通过 SCM API 操作。
 - 不调用 PowerShell、CMD、`reg.exe` 或 `sc.exe`。
 - 修改前保存原始状态，支持一键恢复、写入后回读验证和失败回滚。
@@ -55,6 +55,17 @@
 
 原六项备份格式保持兼容，2.1 的访问封锁使用独立备份文件。
 
+### Windows Server 2016
+
+仅对真实版本 `10.0 / Build 14393 / Server` 启用，复用现代系统的可恢复注册表控制，但不会把 Server 当成桌面 Windows 10：
+
+- 设置 `NoAutoUpdate`、`NoAutoRebootWithLoggedOnUsers`、`ExcludeWUDriversInQualityUpdate` 和 `SetDisableUXWUAccess`。
+- 删除 `AUOptions`，恢复时按原始备份还原。
+- 不写入 Server 2016 不支持的 `SetUpdateNotificationLevel` 和 `UpdateNotificationLevel`，界面显示“当前系统不适用”。
+- 不停止 `wuauserv`、BITS、UsoSvc、WaaSMedicSvc 或 Update Orchestrator。
+
+Windows 11 升级锁定在 Server 2016 上不可用，底层调用同样拒绝写入。其他尚未验证的 Windows Server 版本不会被自动放行。
+
 ### Windows 10 禁止升级到 Windows 11
 
 Windows 10 界面另外提供“禁止升级到 Windows 11”和“恢复允许升级到 Windows 11”。该功能与自动更新控制独立，只写入：
@@ -69,7 +80,7 @@ Windows 10 界面另外提供“禁止升级到 Windows 11”和“恢复允许�
 %ProgramData%\UpdateLock\windows11-upgrade-backup-v1.txt
 ```
 
-Windows 7 和 Windows 11 上该组按钮不可用，底层调用也会拒绝写入。该功能不会禁用更新服务、修改 TPM/Secure Boot 或删除系统文件，也不会把旧版 Windows 10 自动升级到 22H2。
+Windows 7、Windows 11 和 Windows Server 2016 上该组按钮不可用，底层调用也会拒绝写入。该功能不会禁用更新服务、修改 TPM/Secure Boot 或删除系统文件，也不会把旧版 Windows 10 自动升级到 22H2。
 
 ## 重要影响
 
@@ -87,13 +98,13 @@ build-native.cmd
 
 构建输出位于 `native\build`。脚本同时生成 `UpdateLock.exe` 和只使用临时目录的原生测试程序。
 
-发布包只分发一个文件：`Win7-10-11自动更新关闭3.0工具.exe`。`NativeTests.exe`、目标文件和资源文件均不放入发布包。
+发布包只分发一个文件：`Win7-10-11自动更新关闭3.0.1工具.exe`。`NativeTests.exe`、目标文件和资源文件均不放入发布包。
 
 ## 下载与校验
 
 普通用户请从 GitHub Releases 下载单文件 EXE，并使用 Release 中公布的 SHA-256 校验文件完整性。
 
-当前 3.0 EXE 的作者元数据为“啊常用户”，但尚未使用受信任的 Authenticode 证书签名，因此 Windows 仍可能提示“未知发布者”或显示 SmartScreen 警告。
+当前 3.0.1 EXE 的作者元数据为“啊常用户”，但尚未使用受信任的 Authenticode 证书签名，因此 Windows 仍可能提示“未知发布者”或显示 SmartScreen 警告。加壳或混淆不会建立发布者信誉，反而可能提高安全软件的启发式风险；正式分发应使用一致的受信任 Authenticode 证书签名，并对明确误报逐版本提交厂商复核。
 
 ## 验证边界
 

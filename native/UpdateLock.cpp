@@ -25,7 +25,7 @@
 
 namespace {
 
-const wchar_t* const kAppName = L"Win7/10/11自动更新关闭3.0工具";
+const wchar_t* const kAppName = L"Win7/10/11自动更新关闭3.0.1工具";
 const wchar_t* const kMutexName = L"Global\\UpdateLock.SingleInstance.7A64EA9A";
 const wchar_t* const kWindowsUpdate = L"SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate";
 const wchar_t* const kAutomaticUpdates = L"SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU";
@@ -516,6 +516,23 @@ struct VersionInfo {
     BYTE productType;
 };
 
+bool IsWindows10Desktop(const VersionInfo& version) {
+    return version.productType == VER_NT_WORKSTATION &&
+        version.major == 10 && version.minor == 0 && version.build < 22000;
+}
+
+bool IsWindows11Desktop(const VersionInfo& version) {
+    return version.productType == VER_NT_WORKSTATION &&
+        version.major == 10 && version.minor == 0 && version.build >= 22000;
+}
+
+bool IsWindowsServer2016(const VersionInfo& version) {
+    // Windows Server 2016 uses NT 10.0, build 14393. Keep the allow-list
+    // narrow so later server releases are not silently treated as desktop OSes.
+    return version.productType != VER_NT_WORKSTATION &&
+        version.major == 10 && version.minor == 0 && version.build == 14393;
+}
+
 VersionInfo ReadWindowsVersion() {
     typedef LONG (WINAPI* RtlGetVersionFn)(PRTL_OSVERSIONINFOEXW);
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
@@ -596,7 +613,7 @@ public:
     static Windows10VersionInfo Resolve(const VersionInfo& version,
         const std::wstring& displayVersion, const std::wstring& releaseId, DWORD revision) {
         Windows10VersionInfo result;
-        result.isWindows10 = version.major == 10 && version.minor == 0 && version.build < 22000;
+        result.isWindows10 = IsWindows10Desktop(version);
         result.build = version.build;
         result.revision = revision;
         if (!result.isWindows10) return result;
@@ -656,12 +673,16 @@ public:
 
 class ModernUpdateController : public IUpdateController {
 public:
-    explicit ModernUpdateController(const wchar_t* displayName)
+    explicit ModernUpdateController(const wchar_t* displayName, bool supportsNotificationPolicy = true)
         : displayName_(displayName), backupPath_(BackupDirectory() + L"\\policy-backup-v1.txt"),
-          accessBackupPath_(BackupDirectory() + L"\\windows-update-access-backup-v1.txt") {}
+          accessBackupPath_(BackupDirectory() + L"\\windows-update-access-backup-v1.txt"),
+          supportsNotificationPolicy_(supportsNotificationPolicy) {}
 
     std::wstring DisplayName() const override { return displayName_; }
     std::wstring Description() const override {
+        if (!supportsNotificationPolicy_) {
+            return L"关闭 Windows Server 自动更新、更新自动重启和 Windows Update 驱动更新，并禁止手动下载或安装更新。";
+        }
         return L"关闭 Windows 自动更新、更新通知、更新自动重启和 Windows Update 驱动更新，并禁止通过 Windows Update 手动下载或安装更新。";
     }
     std::wstring Warning() const override {
@@ -670,6 +691,10 @@ public:
                L"“恢复”只恢复本软件第一次运行前保存的本机更新策略状态。";
     }
     std::wstring Confirmation() const override {
+        if (!supportsNotificationPolicy_) {
+            return L"这会关闭 Windows Server 自动更新、更新自动重启和 Windows Update 驱动更新。\r\n"
+                   L"同时禁用 Windows Update 的手动检查、下载和安装入口。";
+        }
         return L"这会关闭 Windows 自动更新、更新通知、更新自动重启和 Windows Update 驱动更新。\r\n"
                L"同时禁用 Windows Update 的手动检查、下载和安装入口。";
     }
@@ -687,36 +712,48 @@ public:
     UpdateStatus GetStatus() const override {
         const bool autoBlocked = IsValue(kPolicies[3], 1);
         const bool noRestart = IsValue(kPolicies[4], 1);
-        const bool notificationsBlocked = IsValue(kPolicies[1], 1) && IsValue(kPolicies[2], 2);
+        const bool notificationsBlocked = supportsNotificationPolicy_
+            ? IsValue(kPolicies[1], 1) && IsValue(kPolicies[2], 2)
+            : true;
         const bool driverBlocked = IsValue(kPolicies[0], 1);
         const bool accessBlocked = IsValue(kDisableWindowsUpdateAccess, 1);
-        return BuildStatus(autoBlocked, notificationsBlocked, noRestart, driverBlocked, accessBlocked);
+        return BuildStatus(autoBlocked, notificationsBlocked, noRestart, driverBlocked, accessBlocked,
+            supportsNotificationPolicy_);
     }
 
     static UpdateStatus BuildStatus(bool autoBlocked, bool notificationsBlocked,
-                                    bool noRestart, bool driverBlocked, bool accessBlocked) {
+                                    bool noRestart, bool driverBlocked, bool accessBlocked,
+                                    bool notificationsApplicable = true) {
         StatusLevel level;
         std::wstring title;
         std::wstring summary;
         if (!autoBlocked) {
             level = StatusLevel::Enabled;
-            title = L"Windows 更新未完全关闭";
+            title = L"× Windows 更新未完全关闭";
             summary = L"核心自动更新策略未生效。";
-        } else if (notificationsBlocked && noRestart && driverBlocked && accessBlocked) {
+        } else if ((!notificationsApplicable || notificationsBlocked) &&
+                   noRestart && driverBlocked && accessBlocked) {
             level = StatusLevel::Disabled;
-            title = L"Windows 更新已完全关闭";
+            title = L"√ Windows 更新已完全关闭";
             summary = L"Windows Update 手动检查、下载和安装：已禁用";
         } else {
             level = StatusLevel::PartiallyDisabled;
-            title = L"Windows 自动更新已关闭，但部分封锁策略未生效";
+            title = L"× Windows 自动更新已关闭，但部分封锁策略未生效";
             summary = L"部分附加或访问封锁策略未生效。";
         }
         return UpdateStatus{level, title, {
-            std::wstring(L"自动更新：") + (autoBlocked ? L"已关闭" : L"未关闭") +
-                L"    更新通知：" + (notificationsBlocked ? L"已关闭" : L"未关闭"),
-            std::wstring(L"更新自动重启：") + (noRestart ? L"已限制" : L"未限制") +
-                L"    Windows Update 驱动更新：" + (driverBlocked ? L"已关闭" : L"未关闭"),
-            std::wstring(L"Windows Update 手动访问：") + (accessBlocked ? L"已禁用" : L"未禁用"),
+            std::wstring(autoBlocked ? L"√ " : L"× ") + L"自动更新：" +
+                (autoBlocked ? L"已关闭" : L"未关闭") + L"    " +
+                (notificationsApplicable ? (notificationsBlocked ? L"√ " : L"× ") : L"— ") +
+                L"更新通知：" + (notificationsApplicable
+                    ? (notificationsBlocked ? L"已关闭" : L"未关闭")
+                    : L"当前系统不适用"),
+            std::wstring(noRestart ? L"√ " : L"× ") + L"更新自动重启：" +
+                (noRestart ? L"已限制" : L"未限制") + L"    " +
+                (driverBlocked ? L"√ " : L"× ") + L"Windows Update 驱动更新：" +
+                (driverBlocked ? L"已关闭" : L"未关闭"),
+            std::wstring(accessBlocked ? L"√ " : L"× ") + L"Windows Update 手动访问：" +
+                (accessBlocked ? L"已禁用" : L"未禁用"),
             summary}};
     }
 
@@ -738,8 +775,10 @@ public:
             SetDword(kPolicies[4], 1);
             DeleteDword(kPolicies[5]);
             SetDword(kPolicies[0], 1);
-            SetDword(kPolicies[1], 1);
-            SetDword(kPolicies[2], 2);
+            if (supportsNotificationPolicy_) {
+                SetDword(kPolicies[1], 1);
+                SetDword(kPolicies[2], 2);
+            }
             SetDword(kDisableWindowsUpdateAccess, 1);
             if (GetStatus().level != StatusLevel::Disabled) {
                 throw AppError(L"自动更新、附加策略或 Windows Update 访问封锁写入后回读未全部达到目标状态。" );
@@ -798,6 +837,7 @@ private:
     std::wstring displayName_;
     std::wstring backupPath_;
     std::wstring accessBackupPath_;
+    bool supportsNotificationPolicy_;
 
     static bool IsValue(const PolicyValue& policy, int32_t expected) {
         const PolicyState state = ReadDwordState(policy);
@@ -1093,12 +1133,17 @@ public:
         const bool stopped = service.status == SERVICE_STOPPED;
         const int count = automatic + access + startupDisabled + stopped;
         const StatusLevel level = count == 4 ? StatusLevel::Disabled : count == 0 ? StatusLevel::Enabled : StatusLevel::PartiallyDisabled;
-        const std::wstring title = level == StatusLevel::Disabled ? L"Windows Update 已禁用" :
-            level == StatusLevel::PartiallyDisabled ? L"Windows Update 部分禁用" : L"Windows Update 未禁用";
+        const std::wstring title = level == StatusLevel::Disabled ? L"√ Windows Update 已禁用" :
+            level == StatusLevel::PartiallyDisabled ? L"× Windows Update 部分禁用" : L"× Windows Update 未禁用";
         return {level, title, {
-            std::wstring(L"自动更新策略：") + (automatic ? L"已禁用" : L"未禁用") + L"    Windows Update 访问：" + (access ? L"已禁用" : L"未禁用"),
-            std::wstring(L"Windows Update 服务启动：") + (startupDisabled ? L"已禁用" : StartupName(service.startupType)),
-            std::wstring(L"Windows Update 服务状态：") + (stopped ? L"已停止" : L"正在运行")}};
+            std::wstring(automatic ? L"√ " : L"× ") + L"自动更新策略：" +
+                (automatic ? L"已禁用" : L"未禁用") + L"    " +
+                (access ? L"√ " : L"× ") + L"Windows Update 访问：" +
+                (access ? L"已禁用" : L"未禁用"),
+            std::wstring(startupDisabled ? L"√ " : L"× ") + L"Windows Update 服务启动：" +
+                (startupDisabled ? L"已禁用" : StartupName(service.startupType)),
+            std::wstring(stopped ? L"√ " : L"× ") + L"Windows Update 服务状态：" +
+                (stopped ? L"已停止" : L"正在运行")}};
     }
 
     OperationResult Disable() override {
@@ -1211,7 +1256,7 @@ public:
 
     UpdateStatus GetStatus(const VersionInfo& version) const {
         if (!IsWindows10(version)) {
-            if (version.major == 10 && version.build >= 22000) {
+            if (IsWindows11Desktop(version)) {
                 return UpdateStatus{StatusLevel::Enabled,
                     L"Windows 11 升级状态：当前系统已是 Windows 11",
                     {L"当前系统已是 Windows 11；本功能不适用。"}};
@@ -1296,7 +1341,7 @@ private:
     std::wstring backupPath_;
 
     static bool IsWindows10(const VersionInfo& version) {
-        return version.major == 10 && version.minor == 0 && version.build < 22000;
+        return IsWindows10Desktop(version);
     }
 
     static std::array<RawRegistryState, 3> Capture() {
@@ -1528,7 +1573,7 @@ std::wstring JoinDetails(const std::vector<std::wstring>& details) {
 
 std::wstring BuildSystemLabel(const VersionInfo& version, const std::wstring& displayName) {
     std::wstring result = L"当前系统：" + displayName;
-    if (version.major == 10 && version.minor == 0 && version.build < 22000) {
+    if (IsWindows10Desktop(version)) {
         try {
             const Windows10VersionInfo detected = Windows10VersionDetector::Detect(version);
             if (detected.known) {
@@ -1554,7 +1599,7 @@ void RefreshUi(HWND window, UiContext& ui) {
         EnableWindow(ui.restoreButton, ui.controller->CanRestore() ? TRUE : FALSE);
         InvalidateRect(ui.status, nullptr, TRUE);
     } catch (const AppError& error) {
-        SetWindowTextW(ui.status, L"状态读取失败");
+        SetWindowTextW(ui.status, L"状态：× 状态读取失败");
         SetWindowTextW(ui.details, error.message.c_str());
         ui.statusColor = RGB(170, 38, 38);
         EnableWindow(ui.restoreButton, ui.controller->CanRestore() ? TRUE : FALSE);
@@ -1563,16 +1608,18 @@ void RefreshUi(HWND window, UiContext& ui) {
 
     try {
         const UpdateStatus status = ui.upgradeBlocker.GetStatus(ui.version);
-        SetWindowTextW(ui.upgradeStatus, status.title.c_str());
+        const std::wstring title = IsWindows10Desktop(ui.version)
+            ? std::wstring(status.level == StatusLevel::Disabled ? L"√ " : L"× ") + status.title
+            : status.title;
+        SetWindowTextW(ui.upgradeStatus, title.c_str());
         SetWindowTextW(ui.upgradeDetails, JoinDetails(status.details).c_str());
         ui.upgradeStatusColor = status.level == StatusLevel::Disabled ? RGB(0, 120, 70) :
             status.level == StatusLevel::PartiallyDisabled ? RGB(184, 108, 0) : RGB(38, 91, 135);
-        EnableWindow(ui.upgradeDisableButton,
-            ui.version.major == 10 && ui.version.minor == 0 && ui.version.build < 22000);
+        EnableWindow(ui.upgradeDisableButton, IsWindows10Desktop(ui.version) ? TRUE : FALSE);
         EnableWindow(ui.upgradeRestoreButton, ui.upgradeBlocker.CanRestore(ui.version) ? TRUE : FALSE);
         InvalidateRect(ui.upgradeStatus, nullptr, TRUE);
     } catch (const AppError& error) {
-        SetWindowTextW(ui.upgradeStatus, L"Windows 11 升级状态：读取失败");
+        SetWindowTextW(ui.upgradeStatus, L"× Windows 11 升级状态：读取失败");
         SetWindowTextW(ui.upgradeDetails, error.message.c_str());
         ui.upgradeStatusColor = RGB(170, 38, 38);
         EnableWindow(ui.upgradeDisableButton, FALSE);
@@ -1630,26 +1677,26 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
         ui->status = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
             scale(46), scale(172), scale(550), scale(30), window, reinterpret_cast<HMENU>(IDC_STATUS), nullptr, nullptr);
         ui->details = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-            scale(46), scale(211), scale(550), scale(80), window, reinterpret_cast<HMENU>(IDC_DETAILS), nullptr, nullptr);
+            scale(46), scale(210), scale(550), scale(74), window, reinterpret_cast<HMENU>(IDC_DETAILS), nullptr, nullptr);
         ui->disableButton = CreateWindowExW(0, L"BUTTON", ui->controller->DisableButtonText().c_str(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(26), scale(334), scale(282), scale(52),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(26), scale(296), scale(282), scale(52),
             window, reinterpret_cast<HMENU>(IDC_DISABLE), nullptr, nullptr);
         ui->restoreButton = CreateWindowExW(0, L"BUTTON", L"恢复到运行本软件前的状态",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(332), scale(334), scale(282), scale(52),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(332), scale(296), scale(282), scale(52),
             window, reinterpret_cast<HMENU>(IDC_RESTORE), nullptr, nullptr);
         ui->upgradeStatus = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-            scale(46), scale(397), scale(550), scale(30), window, reinterpret_cast<HMENU>(IDC_UPGRADE_STATUS), nullptr, nullptr);
+            scale(46), scale(394), scale(550), scale(30), window, reinterpret_cast<HMENU>(IDC_UPGRADE_STATUS), nullptr, nullptr);
         ui->upgradeDetails = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-            scale(46), scale(431), scale(550), scale(65), window, reinterpret_cast<HMENU>(IDC_UPGRADE_DETAILS), nullptr, nullptr);
+            scale(46), scale(429), scale(550), scale(57), window, reinterpret_cast<HMENU>(IDC_UPGRADE_DETAILS), nullptr, nullptr);
         ui->upgradeDisableButton = CreateWindowExW(0, L"BUTTON", ui->upgradeBlocker.BlockButtonText().c_str(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(26), scale(503), scale(282), scale(52),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(26), scale(493), scale(282), scale(52),
             window, reinterpret_cast<HMENU>(IDC_UPGRADE_DISABLE), nullptr, nullptr);
         ui->upgradeRestoreButton = CreateWindowExW(0, L"BUTTON", ui->upgradeBlocker.RestoreButtonText().c_str(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(332), scale(503), scale(282), scale(52),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(332), scale(493), scale(282), scale(52),
             window, reinterpret_cast<HMENU>(IDC_UPGRADE_RESTORE), nullptr, nullptr);
         const std::wstring warningText = ui->controller->Warning() + L"\r\n" + ui->upgradeBlocker.Warning();
         ui->warning = CreateWindowExW(0, L"STATIC", warningText.c_str(), WS_CHILD | WS_VISIBLE,
-            scale(42), scale(580), scale(555), scale(124), window, reinterpret_cast<HMENU>(IDC_WARNING), nullptr, nullptr);
+            scale(42), scale(582), scale(555), scale(124), window, reinterpret_cast<HMENU>(IDC_WARNING), nullptr, nullptr);
         for (HWND control : {title, author, ui->system, ui->description, ui->details,
              ui->disableButton, ui->restoreButton, ui->upgradeDetails,
              ui->upgradeDisableButton, ui->upgradeRestoreButton, ui->warning}) SetControlFont(control, ui->normalFont);
@@ -1668,9 +1715,9 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
             reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
         if (ui) {
             const auto scale = [ui](int value) { return ScaleForDpi(value, ui->dpi); };
-            RECT statusPanel = {scale(26), scale(153), scale(614), scale(313)};
-            RECT upgradePanel = {scale(26), scale(386), scale(614), scale(567)};
-            RECT warningPanel = {scale(26), scale(567), scale(614), scale(718)};
+            RECT statusPanel = {scale(26), scale(153), scale(614), scale(360)};
+            RECT upgradePanel = {scale(26), scale(378), scale(614), scale(555)};
+            RECT warningPanel = {scale(26), scale(570), scale(614), scale(718)};
             FillRoundedPanel(dc, statusPanel, RGB(244, 250, 247), RGB(211, 225, 216), scale(12));
             FillRoundedPanel(dc, upgradePanel, RGB(244, 248, 252), RGB(208, 220, 234), scale(12));
             FillRoundedPanel(dc, warningPanel, RGB(255, 249, 235), RGB(238, 218, 169), scale(12));
@@ -1802,11 +1849,19 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 }
 
 std::unique_ptr<IUpdateController> CreateController(const VersionInfo& version) {
-    if (version.productType != VER_NT_WORKSTATION) throw AppError(L"本工具仅支持 Windows 工作站系统。" );
-    if (version.major == 6 && version.minor == 1) return std::unique_ptr<IUpdateController>(new Windows7UpdateController());
-    if (version.major == 10 && version.build >= 22000) return std::unique_ptr<IUpdateController>(new ModernUpdateController(L"Windows 11"));
-    if (version.major == 10) return std::unique_ptr<IUpdateController>(new ModernUpdateController(L"Windows 10"));
-    throw AppError(L"本工具仅支持 Windows 7、Windows 10 和 Windows 11。当前系统不会被修改。" );
+    if (version.productType == VER_NT_WORKSTATION && version.major == 6 && version.minor == 1) {
+        return std::unique_ptr<IUpdateController>(new Windows7UpdateController());
+    }
+    if (IsWindowsServer2016(version)) {
+        return std::unique_ptr<IUpdateController>(new ModernUpdateController(L"Windows Server 2016", false));
+    }
+    if (IsWindows11Desktop(version)) {
+        return std::unique_ptr<IUpdateController>(new ModernUpdateController(L"Windows 11"));
+    }
+    if (IsWindows10Desktop(version)) {
+        return std::unique_ptr<IUpdateController>(new ModernUpdateController(L"Windows 10"));
+    }
+    throw AppError(L"本工具仅支持 Windows 7、Windows 10、Windows 11 和 Windows Server 2016。当前系统不会被修改。" );
 }
 
 } // namespace
