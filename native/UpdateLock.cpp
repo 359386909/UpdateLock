@@ -1,5 +1,15 @@
 #include <windows.h>
 #include <commctrl.h>
+#include <objidl.h>
+#include <algorithm>
+namespace Gdiplus {
+using std::max;
+using std::min;
+}
+#pragma warning(push)
+#pragma warning(disable: 4458)
+#include <gdiplus.h>
+#pragma warning(pop)
 #include <shellapi.h>
 #include <shlobj.h>
 #include <sddl.h>
@@ -8,7 +18,6 @@
 #include <objbase.h>
 #include <wuapi.h>
 
-#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdint>
@@ -1512,6 +1521,26 @@ struct UiContext {
     int dpi = 96;
 };
 
+class GdiplusSession {
+public:
+    GdiplusSession() {
+        Gdiplus::GdiplusStartupInput input;
+        if (Gdiplus::GdiplusStartup(&token_, &input, nullptr) != Gdiplus::Ok) {
+            throw AppError(L"无法初始化 Windows GDI+ 图形组件。" );
+        }
+    }
+
+    ~GdiplusSession() {
+        if (token_) Gdiplus::GdiplusShutdown(token_);
+    }
+
+    GdiplusSession(const GdiplusSession&) = delete;
+    GdiplusSession& operator=(const GdiplusSession&) = delete;
+
+private:
+    ULONG_PTR token_ = 0;
+};
+
 int ScaleForDpi(int value, int dpi) {
     return MulDiv(value, dpi, 96);
 }
@@ -1749,73 +1778,124 @@ void FillRectColor(HDC dc, const RECT& rect, COLORREF color) {
     DeleteObject(brush);
 }
 
+Gdiplus::Color GdiplusColor(COLORREF color) {
+    return Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color));
+}
+
+void ConfigureIconGraphics(Gdiplus::Graphics& graphics) {
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    graphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
+}
+
+void AddRoundedRectPath(Gdiplus::GraphicsPath& path, const RECT& rect, int radius) {
+    const Gdiplus::REAL x = static_cast<Gdiplus::REAL>(rect.left);
+    const Gdiplus::REAL y = static_cast<Gdiplus::REAL>(rect.top);
+    const Gdiplus::REAL width = static_cast<Gdiplus::REAL>(rect.right - rect.left);
+    const Gdiplus::REAL height = static_cast<Gdiplus::REAL>(rect.bottom - rect.top);
+    const Gdiplus::REAL diameter = static_cast<Gdiplus::REAL>(
+        std::max(1, std::min(radius * 2, static_cast<int>(std::min(width, height)))));
+    path.AddArc(x, y, diameter, diameter, 180.0f, 90.0f);
+    path.AddArc(x + width - diameter, y, diameter, diameter, 270.0f, 90.0f);
+    path.AddArc(x + width - diameter, y + height - diameter,
+        diameter, diameter, 0.0f, 90.0f);
+    path.AddArc(x, y + height - diameter, diameter, diameter, 90.0f, 90.0f);
+    path.CloseFigure();
+}
+
+void FillRoundedBadge(HDC dc, const RECT& rect, COLORREF fill,
+    COLORREF border, int radius) {
+    Gdiplus::Graphics graphics(dc);
+    ConfigureIconGraphics(graphics);
+    Gdiplus::GraphicsPath path;
+    AddRoundedRectPath(path, rect, radius);
+    Gdiplus::SolidBrush brush(GdiplusColor(fill));
+    Gdiplus::Pen pen(GdiplusColor(border), 1.0f);
+    graphics.FillPath(&brush, &path);
+    graphics.DrawPath(&pen, &path);
+}
+
 void DrawStatusIcon(HDC dc, int centerX, int centerY, int size,
     StatusVisual visual) {
     const VisualPalette palette = PaletteFor(visual);
-    const int half = size / 2;
-    HPEN shapePen = CreatePen(PS_SOLID, 1, palette.foreground);
-    HBRUSH shapeBrush = CreateSolidBrush(palette.foreground);
-    HGDIOBJ oldPen = SelectObject(dc, shapePen);
-    HGDIOBJ oldBrush = SelectObject(dc, shapeBrush);
+    Gdiplus::Graphics graphics(dc);
+    ConfigureIconGraphics(graphics);
+    const Gdiplus::REAL iconSize = static_cast<Gdiplus::REAL>(size);
+    const Gdiplus::REAL half = iconSize / 2.0f;
+    const Gdiplus::REAL left = static_cast<Gdiplus::REAL>(centerX) - half;
+    const Gdiplus::REAL top = static_cast<Gdiplus::REAL>(centerY) - half;
+    Gdiplus::SolidBrush shapeBrush(GdiplusColor(palette.foreground));
     if (visual == StatusVisual::Warning) {
-        POINT points[3] = {{centerX, centerY - half},
-            {centerX - half, centerY + half}, {centerX + half, centerY + half}};
-        Polygon(dc, points, 3);
+        const Gdiplus::PointF points[3] = {
+            Gdiplus::PointF(static_cast<Gdiplus::REAL>(centerX), top),
+            Gdiplus::PointF(left, top + iconSize),
+            Gdiplus::PointF(left + iconSize, top + iconSize)};
+        graphics.FillPolygon(&shapeBrush, points, static_cast<INT>(std::size(points)));
     } else {
-        Ellipse(dc, centerX - half, centerY - half, centerX + half, centerY + half);
+        graphics.FillEllipse(&shapeBrush, left, top, iconSize, iconSize);
     }
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(shapeBrush);
-    DeleteObject(shapePen);
 
-    const int stroke = std::max(1, size / 8);
-    HPEN markPen = CreatePen(PS_SOLID, stroke, RGB(255, 255, 255));
-    oldPen = SelectObject(dc, markPen);
+    const Gdiplus::REAL stroke = std::max(1.6f, iconSize * 0.11f);
+    Gdiplus::Pen markPen(Gdiplus::Color(255, 255, 255), stroke);
+    markPen.SetStartCap(Gdiplus::LineCapRound);
+    markPen.SetEndCap(Gdiplus::LineCapRound);
+    markPen.SetLineJoin(Gdiplus::LineJoinRound);
+    const Gdiplus::REAL cx = static_cast<Gdiplus::REAL>(centerX);
+    const Gdiplus::REAL cy = static_cast<Gdiplus::REAL>(centerY);
     if (visual == StatusVisual::Success) {
-        MoveToEx(dc, centerX - size / 4, centerY, nullptr);
-        LineTo(dc, centerX - size / 16, centerY + size / 5);
-        LineTo(dc, centerX + size / 3, centerY - size / 4);
+        const Gdiplus::PointF check[3] = {
+            Gdiplus::PointF(cx - iconSize * 0.25f, cy + iconSize * 0.01f),
+            Gdiplus::PointF(cx - iconSize * 0.07f, cy + iconSize * 0.19f),
+            Gdiplus::PointF(cx + iconSize * 0.29f, cy - iconSize * 0.22f)};
+        graphics.DrawLines(&markPen, check, static_cast<INT>(std::size(check)));
     } else if (visual == StatusVisual::Error) {
-        MoveToEx(dc, centerX - size / 4, centerY - size / 4, nullptr);
-        LineTo(dc, centerX + size / 4, centerY + size / 4);
-        MoveToEx(dc, centerX + size / 4, centerY - size / 4, nullptr);
-        LineTo(dc, centerX - size / 4, centerY + size / 4);
+        const Gdiplus::REAL arm = iconSize * 0.22f;
+        graphics.DrawLine(&markPen, cx - arm, cy - arm, cx + arm, cy + arm);
+        graphics.DrawLine(&markPen, cx + arm, cy - arm, cx - arm, cy + arm);
     } else if (visual == StatusVisual::Warning) {
-        MoveToEx(dc, centerX, centerY - size / 5, nullptr);
-        LineTo(dc, centerX, centerY + size / 7);
-        MoveToEx(dc, centerX, centerY + size / 3, nullptr);
-        LineTo(dc, centerX, centerY + size / 3 + 1);
+        graphics.DrawLine(&markPen, cx, cy - iconSize * 0.22f,
+            cx, cy + iconSize * 0.13f);
+        Gdiplus::SolidBrush markBrush(Gdiplus::Color(255, 255, 255));
+        const Gdiplus::REAL dot = std::max(1.8f, iconSize * 0.12f);
+        graphics.FillEllipse(&markBrush, cx - dot / 2.0f,
+            cy + iconSize * 0.28f - dot / 2.0f, dot, dot);
     } else {
-        MoveToEx(dc, centerX - size / 4, centerY, nullptr);
-        LineTo(dc, centerX + size / 4, centerY);
+        graphics.DrawLine(&markPen, cx - iconSize * 0.24f, cy,
+            cx + iconSize * 0.24f, cy);
     }
-    SelectObject(dc, oldPen);
-    DeleteObject(markPen);
 }
 
 void DrawButtonActionIcon(HDC dc, int centerX, int centerY, int size,
     COLORREF color, bool restore) {
-    HPEN pen = CreatePen(PS_SOLID, std::max(1, size / 8), color);
-    HGDIOBJ oldPen = SelectObject(dc, pen);
-    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+    Gdiplus::Graphics graphics(dc);
+    ConfigureIconGraphics(graphics);
+    const Gdiplus::REAL iconSize = static_cast<Gdiplus::REAL>(size);
+    const Gdiplus::REAL cx = static_cast<Gdiplus::REAL>(centerX);
+    const Gdiplus::REAL cy = static_cast<Gdiplus::REAL>(centerY);
+    const Gdiplus::REAL stroke = std::max(1.8f, iconSize * 0.095f);
+    Gdiplus::Pen pen(GdiplusColor(color), stroke);
+    pen.SetStartCap(Gdiplus::LineCapRound);
+    pen.SetEndCap(Gdiplus::LineCapRound);
+    pen.SetLineJoin(Gdiplus::LineJoinRound);
     if (restore) {
-        Arc(dc, centerX - size / 2, centerY - size / 2,
-            centerX + size / 2, centerY + size / 2,
-            centerX - size / 2, centerY, centerX, centerY - size / 2);
-        MoveToEx(dc, centerX - size / 2, centerY, nullptr);
-        LineTo(dc, centerX - size / 5, centerY - size / 4);
-        MoveToEx(dc, centerX - size / 2, centerY, nullptr);
-        LineTo(dc, centerX - size / 5, centerY + size / 4);
+        const Gdiplus::REAL inset = iconSize * 0.10f;
+        const Gdiplus::RectF arcBounds(cx - iconSize / 2.0f + inset,
+            cy - iconSize / 2.0f + inset, iconSize - inset * 2.0f,
+            iconSize - inset * 2.0f);
+        graphics.DrawArc(&pen, arcBounds, 205.0f, 260.0f);
+        const Gdiplus::PointF tip(cx - iconSize * 0.43f, cy - iconSize * 0.18f);
+        graphics.DrawLine(&pen, tip,
+            Gdiplus::PointF(cx - iconSize * 0.10f, cy - iconSize * 0.22f));
+        graphics.DrawLine(&pen, tip,
+            Gdiplus::PointF(cx - iconSize * 0.34f, cy + iconSize * 0.12f));
     } else {
-        Ellipse(dc, centerX - size / 2, centerY - size / 2,
-            centerX + size / 2, centerY + size / 2);
-        MoveToEx(dc, centerX - size / 3, centerY + size / 3, nullptr);
-        LineTo(dc, centerX + size / 3, centerY - size / 3);
+        const Gdiplus::REAL inset = stroke / 2.0f + 0.5f;
+        graphics.DrawEllipse(&pen, cx - iconSize / 2.0f + inset,
+            cy - iconSize / 2.0f + inset, iconSize - inset * 2.0f,
+            iconSize - inset * 2.0f);
+        graphics.DrawLine(&pen, cx - iconSize * 0.29f, cy + iconSize * 0.29f,
+            cx + iconSize * 0.29f, cy - iconSize * 0.29f);
     }
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(pen);
 }
 
 void DrawOwnerButton(const DRAWITEMSTRUCT& item) {
@@ -1878,52 +1958,57 @@ enum class CardIdentityIcon { UpdateShield, Windows };
 void DrawUpdateShield(HDC dc, int centerX, int centerY, int size,
     StatusVisual visual) {
     const COLORREF color = PaletteFor(visual).foreground;
-    const int half = size / 2;
-    POINT shield[6] = {
-        {centerX, centerY - half},
-        {centerX + half, centerY - size / 3},
-        {centerX + size * 2 / 5, centerY + size / 4},
-        {centerX, centerY + half},
-        {centerX - size * 2 / 5, centerY + size / 4},
-        {centerX - half, centerY - size / 3}};
-    HPEN pen = CreatePen(PS_SOLID, 1, color);
-    HBRUSH brush = CreateSolidBrush(color);
-    HGDIOBJ oldPen = SelectObject(dc, pen);
-    HGDIOBJ oldBrush = SelectObject(dc, brush);
-    Polygon(dc, shield, static_cast<int>(std::size(shield)));
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(brush);
-    DeleteObject(pen);
+    Gdiplus::Graphics graphics(dc);
+    ConfigureIconGraphics(graphics);
+    const Gdiplus::REAL iconSize = static_cast<Gdiplus::REAL>(size);
+    const Gdiplus::REAL cx = static_cast<Gdiplus::REAL>(centerX);
+    const Gdiplus::REAL cy = static_cast<Gdiplus::REAL>(centerY);
+    const Gdiplus::PointF shield[8] = {
+        Gdiplus::PointF(cx, cy - iconSize * 0.50f),
+        Gdiplus::PointF(cx + iconSize * 0.46f, cy - iconSize * 0.31f),
+        Gdiplus::PointF(cx + iconSize * 0.40f, cy + iconSize * 0.17f),
+        Gdiplus::PointF(cx + iconSize * 0.22f, cy + iconSize * 0.39f),
+        Gdiplus::PointF(cx, cy + iconSize * 0.52f),
+        Gdiplus::PointF(cx - iconSize * 0.22f, cy + iconSize * 0.39f),
+        Gdiplus::PointF(cx - iconSize * 0.40f, cy + iconSize * 0.17f),
+        Gdiplus::PointF(cx - iconSize * 0.46f, cy - iconSize * 0.31f)};
+    Gdiplus::GraphicsPath path;
+    path.AddClosedCurve(shield, static_cast<INT>(std::size(shield)), 0.14f);
+    Gdiplus::SolidBrush brush(GdiplusColor(color));
+    graphics.FillPath(&brush, &path);
 
-    HPEN checkPen = CreatePen(PS_SOLID, std::max(2, size / 11), RGB(255, 255, 255));
-    oldPen = SelectObject(dc, checkPen);
-    MoveToEx(dc, centerX - size / 4, centerY, nullptr);
-    LineTo(dc, centerX - size / 16, centerY + size / 5);
-    LineTo(dc, centerX + size / 3, centerY - size / 4);
-    SelectObject(dc, oldPen);
-    DeleteObject(checkPen);
+    const Gdiplus::REAL stroke = std::max(2.2f, iconSize * 0.085f);
+    Gdiplus::Pen checkPen(Gdiplus::Color(255, 255, 255), stroke);
+    checkPen.SetStartCap(Gdiplus::LineCapRound);
+    checkPen.SetEndCap(Gdiplus::LineCapRound);
+    checkPen.SetLineJoin(Gdiplus::LineJoinRound);
+    const Gdiplus::PointF check[3] = {
+        Gdiplus::PointF(cx - iconSize * 0.23f, cy + iconSize * 0.01f),
+        Gdiplus::PointF(cx - iconSize * 0.05f, cy + iconSize * 0.19f),
+        Gdiplus::PointF(cx + iconSize * 0.28f, cy - iconSize * 0.20f)};
+    graphics.DrawLines(&checkPen, check, static_cast<INT>(std::size(check)));
 }
 
 void DrawWindowsMark(HDC dc, int centerX, int centerY, int size) {
-    const int half = size / 2;
-    const int gap = std::max(2, size / 12);
+    Gdiplus::Graphics graphics(dc);
+    ConfigureIconGraphics(graphics);
+    const int gap = std::max(2, size / 9);
     const int tile = (size - gap) / 2;
-    HBRUSH brush = CreateSolidBrush(RGB(0, 120, 215));
-    const RECT tiles[4] = {
-        {centerX - half, centerY - half, centerX - half + tile, centerY - half + tile},
-        {centerX - half + tile + gap, centerY - half, centerX + half, centerY - half + tile},
-        {centerX - half, centerY - half + tile + gap, centerX - half + tile, centerY + half},
-        {centerX - half + tile + gap, centerY - half + tile + gap, centerX + half, centerY + half}};
-    for (const RECT& tileRect : tiles) FillRect(dc, &tileRect, brush);
-    DeleteObject(brush);
+    const int markSize = tile * 2 + gap;
+    const int left = centerX - markSize / 2;
+    const int top = centerY - markSize / 2;
+    Gdiplus::SolidBrush brush(Gdiplus::Color(255, 0, 120, 215));
+    graphics.FillRectangle(&brush, left, top, tile, tile);
+    graphics.FillRectangle(&brush, left + tile + gap, top, tile, tile);
+    graphics.FillRectangle(&brush, left, top + tile + gap, tile, tile);
+    graphics.FillRectangle(&brush, left + tile + gap, top + tile + gap, tile, tile);
 }
 
 void DrawCardHeader(HDC dc, const UiContext& ui, const RECT& bounds,
     const std::wstring& prefix, const std::wstring& state, StatusVisual visual,
     CardIdentityIcon identity) {
     const int pad = ScaleForDpi(10, ui.dpi);
-    const int identitySize = ScaleForDpi(identity == CardIdentityIcon::UpdateShield ? 36 : 34, ui.dpi);
+    const int identitySize = ScaleForDpi(36, ui.dpi);
     const int statusIconSize = ScaleForDpi(22, ui.dpi);
     const int centerY = (bounds.top + bounds.bottom) / 2;
     const int identityX = bounds.left + pad + identitySize / 2;
@@ -1960,16 +2045,22 @@ void DrawStatusBadge(HDC dc, const UiContext& ui, const RECT& bounds,
     const std::wstring& text, StatusVisual visual) {
     const VisualPalette palette = PaletteFor(visual);
     const int badgeHeight = static_cast<int>(bounds.bottom - bounds.top);
-    FillRoundedPanel(dc, bounds, palette.background, palette.border,
-        std::max(8, badgeHeight));
+    FillRoundedBadge(dc, bounds, palette.background, palette.border,
+        badgeHeight / 2);
     HGDIOBJ oldFont = SelectObject(dc, ui.badgeFont);
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, palette.foreground);
-    const int iconSize = std::max(16, badgeHeight - ScaleForDpi(6, ui.dpi));
-    const int iconX = bounds.right - ScaleForDpi(10, ui.dpi) - iconSize / 2;
-    RECT textRect = {bounds.left + ScaleForDpi(10, ui.dpi), bounds.top,
-        iconX - iconSize / 2 - ScaleForDpi(5, ui.dpi), bounds.bottom};
-    DrawTextW(dc, text.c_str(), -1, &textRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    const int iconSize = std::min(ScaleForDpi(18, ui.dpi),
+        badgeHeight - ScaleForDpi(6, ui.dpi));
+    const int gap = ScaleForDpi(8, ui.dpi);
+    const int textWidth = MeasureTextWidth(dc, text);
+    const int contentWidth = textWidth + gap + iconSize;
+    const int contentLeft = bounds.left + ((bounds.right - bounds.left) - contentWidth) / 2;
+    const int iconX = contentLeft + textWidth + gap + iconSize / 2;
+    RECT textRect = {contentLeft, bounds.top,
+        contentLeft + textWidth, bounds.bottom};
+    DrawTextW(dc, text.c_str(), -1, &textRect,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     DrawStatusIcon(dc, iconX, (bounds.top + bounds.bottom) / 2, iconSize, visual);
     SelectObject(dc, oldFont);
 }
@@ -2027,20 +2118,27 @@ void DrawUpdateStatusCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
     RECT body = {item.rcItem.left + ScaleForDpi(6, ui.dpi), header.bottom + ScaleForDpi(2, ui.dpi),
         item.rcItem.right - ScaleForDpi(6, ui.dpi), item.rcItem.bottom};
     FillRoundedPanel(item.hDC, body, RGB(255, 255, 255), RGB(228, 234, 240), ScaleForDpi(8, ui.dpi));
-    const int rowHeight = (body.bottom - body.top) / static_cast<int>(rows.size());
+    const int rowHeight = ScaleForDpi(26, ui.dpi);
+    const int badgeWidth = ScaleForDpi(118, ui.dpi);
+    const int badgeHeight = ScaleForDpi(24, ui.dpi);
+    const int rowsHeight = rowHeight * static_cast<int>(rows.size());
+    const int rowsTop = body.top + std::max(0,
+        (static_cast<int>(body.bottom - body.top) - rowsHeight) / 2);
+    const int badgeRight = body.right - ScaleForDpi(18, ui.dpi);
     HGDIOBJ oldFont = SelectObject(item.hDC, ui.normalFont);
     SetBkMode(item.hDC, TRANSPARENT);
     for (size_t i = 0; i < rows.size(); ++i) {
-        const int top = body.top + static_cast<int>(i) * rowHeight;
-        const int bottom = i + 1 == rows.size() ? body.bottom : top + rowHeight;
+        const int top = rowsTop + static_cast<int>(i) * rowHeight;
+        const int bottom = top + rowHeight;
+        const int badgeTop = top + (rowHeight - badgeHeight) / 2;
+        RECT badge = {badgeRight - badgeWidth, badgeTop,
+            badgeRight, badgeTop + badgeHeight};
         RECT labelRect = {body.left + ScaleForDpi(14, ui.dpi), top,
-            body.right - ScaleForDpi(174, ui.dpi), bottom};
+            badge.left - ScaleForDpi(12, ui.dpi), bottom};
         SetTextColor(item.hDC, RGB(35, 49, 66));
         DrawTextW(item.hDC, rows[i].label.c_str(), -1, &labelRect,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         if (rows[i].badge) {
-            RECT badge = {body.right - ScaleForDpi(156, ui.dpi), top + ScaleForDpi(1, ui.dpi),
-                body.right - ScaleForDpi(18, ui.dpi), bottom - ScaleForDpi(1, ui.dpi)};
             DrawStatusBadge(item.hDC, ui, badge, rows[i].value, rows[i].visual);
         }
     }
@@ -2062,12 +2160,17 @@ void DrawUpgradeStatusCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
     RECT body = {item.rcItem.left + ScaleForDpi(6, ui.dpi), header.bottom + ScaleForDpi(2, ui.dpi),
         item.rcItem.right - ScaleForDpi(6, ui.dpi), item.rcItem.bottom};
     FillRoundedPanel(item.hDC, body, RGB(255, 255, 255), RGB(228, 234, 240), ScaleForDpi(8, ui.dpi));
-    const int rowHeight = (body.bottom - body.top) / static_cast<int>(rows.size());
+    const int rowHeight = ScaleForDpi(24, ui.dpi);
+    const int badgeHeight = ScaleForDpi(24, ui.dpi);
+    const int rowsHeight = rowHeight * static_cast<int>(rows.size());
+    const int rowsTop = body.top + std::max(0,
+        (static_cast<int>(body.bottom - body.top) - rowsHeight) / 2);
+    const int badgeRight = body.right - ScaleForDpi(18, ui.dpi);
     HGDIOBJ oldFont = SelectObject(item.hDC, ui.normalFont);
     SetBkMode(item.hDC, TRANSPARENT);
     for (size_t i = 0; i < rows.size(); ++i) {
-        const int top = body.top + static_cast<int>(i) * rowHeight;
-        const int bottom = i + 1 == rows.size() ? body.bottom : top + rowHeight;
+        const int top = rowsTop + static_cast<int>(i) * rowHeight;
+        const int bottom = top + rowHeight;
         if (rows[i].value.empty()) {
             RECT lineRect = {body.left + ScaleForDpi(14, ui.dpi), top,
                 body.right - ScaleForDpi(14, ui.dpi), bottom};
@@ -2083,13 +2186,13 @@ void DrawUpgradeStatusCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             if (rows[i].badge) {
                 HGDIOBJ badgeMeasureFont = SelectObject(item.hDC, ui.badgeFont);
-                int badgeWidth = MeasureTextWidth(item.hDC, rows[i].value) + ScaleForDpi(54, ui.dpi);
+                int badgeWidth = MeasureTextWidth(item.hDC, rows[i].value) + ScaleForDpi(46, ui.dpi);
                 SelectObject(item.hDC, badgeMeasureFont);
-                badgeWidth = std::max(ScaleForDpi(112, ui.dpi),
-                    std::min(ScaleForDpi(210, ui.dpi), badgeWidth));
-                RECT badge = {body.right - ScaleForDpi(18, ui.dpi) - badgeWidth,
-                    top + ScaleForDpi(1, ui.dpi), body.right - ScaleForDpi(18, ui.dpi),
-                    bottom - ScaleForDpi(1, ui.dpi)};
+                badgeWidth = std::max(ScaleForDpi(118, ui.dpi),
+                    std::min(ScaleForDpi(145, ui.dpi), badgeWidth));
+                const int badgeTop = top + (rowHeight - badgeHeight) / 2;
+                RECT badge = {badgeRight - badgeWidth, badgeTop,
+                    badgeRight, badgeTop + badgeHeight};
                 DrawStatusBadge(item.hDC, ui, badge, rows[i].value, rows[i].visual);
             } else {
                 RECT valueRect = {body.left + ScaleForDpi(146, ui.dpi), top,
@@ -2140,6 +2243,69 @@ void DrawWarningCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
     SelectObject(item.hDC, oldFont);
 }
 
+bool DrawOwnerItemContent(const DRAWITEMSTRUCT& item, const UiContext& ui) {
+    switch (item.CtlID) {
+    case IDC_DISABLE:
+    case IDC_RESTORE:
+    case IDC_UPGRADE_DISABLE:
+    case IDC_UPGRADE_RESTORE:
+        DrawOwnerButton(item);
+        return true;
+    case IDC_SYSTEM:
+        DrawSystemInfo(item, ui);
+        return true;
+    case IDC_STATUS:
+        DrawUpdateStatusCard(item, ui);
+        return true;
+    case IDC_UPGRADE_STATUS:
+        DrawUpgradeStatusCard(item, ui);
+        return true;
+    case IDC_WARNING:
+        DrawWarningCard(item, ui);
+        return true;
+    default:
+        return false;
+    }
+}
+
+COLORREF OwnerItemBackground(const DRAWITEMSTRUCT& item, const UiContext& ui) {
+    if (item.CtlID == IDC_DISABLE || item.CtlID == IDC_RESTORE) {
+        return PaletteFor(UpdateVisual(ui)).panel;
+    }
+    if (item.CtlID == IDC_UPGRADE_DISABLE || item.CtlID == IDC_UPGRADE_RESTORE) {
+        return PaletteFor(UpgradeVisual(ui)).panel;
+    }
+    return RGB(247, 249, 252);
+}
+
+bool DrawOwnerItemBuffered(const DRAWITEMSTRUCT& item, const UiContext& ui) {
+    const int width = item.rcItem.right - item.rcItem.left;
+    const int height = item.rcItem.bottom - item.rcItem.top;
+    if (width <= 0 || height <= 0) return false;
+    HDC bufferDc = CreateCompatibleDC(item.hDC);
+    HBITMAP bufferBitmap = bufferDc ? CreateCompatibleBitmap(item.hDC, width, height) : nullptr;
+    if (!bufferDc || !bufferBitmap) {
+        if (bufferBitmap) DeleteObject(bufferBitmap);
+        if (bufferDc) DeleteDC(bufferDc);
+        return DrawOwnerItemContent(item, ui);
+    }
+    HGDIOBJ oldBitmap = SelectObject(bufferDc, bufferBitmap);
+    RECT bufferRect = {0, 0, width, height};
+    FillRectColor(bufferDc, bufferRect, OwnerItemBackground(item, ui));
+    DRAWITEMSTRUCT bufferedItem = item;
+    bufferedItem.hDC = bufferDc;
+    bufferedItem.rcItem = bufferRect;
+    const bool handled = DrawOwnerItemContent(bufferedItem, ui);
+    if (handled) {
+        BitBlt(item.hDC, item.rcItem.left, item.rcItem.top, width, height,
+            bufferDc, 0, 0, SRCCOPY);
+    }
+    SelectObject(bufferDc, oldBitmap);
+    DeleteObject(bufferBitmap);
+    DeleteDC(bufferDc);
+    return handled;
+}
+
 std::wstring BuildAccessibleStatusText(const std::wstring& header,
     const std::vector<StatusRow>& rows) {
     std::wstring result = header;
@@ -2175,7 +2341,7 @@ void RefreshUi(HWND window, UiContext& ui) {
         L"Windows 11 升级状态：" + UpgradeHeaderState(ui), BuildUpgradeRows(ui)).c_str());
     InvalidateRect(ui.status, nullptr, FALSE);
     InvalidateRect(ui.upgradeStatus, nullptr, FALSE);
-    InvalidateRect(window, nullptr, TRUE);
+    InvalidateRect(window, nullptr, FALSE);
 }
 
 void ShowOperationResult(HWND owner, const OperationResult& result) {
@@ -2213,7 +2379,7 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
         ui->stateFont = CreateFontW(-MulDiv(18, dpi, 72), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-        ui->badgeFont = CreateFontW(-MulDiv(10, dpi, 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        ui->badgeFont = CreateFontW(-MulDiv(9, dpi, 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
         ui->buttonFont = CreateFontW(-MulDiv(11, dpi, 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
@@ -2288,22 +2454,47 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
         RefreshUi(window, *ui);
         return 0;
     }
+    case WM_ERASEBKGND:
+        return 1;
     case WM_PAINT: {
         PAINTSTRUCT paint = {};
         HDC dc = BeginPaint(window, &paint);
         RECT client = {};
         GetClientRect(window, &client);
-        FillRect(dc, &client, ui && ui->backgroundBrush ? ui->backgroundBrush :
-            reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
-        if (ui) {
-            const UiLayout layout = BuildUiLayout(ui->dpi);
-            const VisualPalette updatePalette = PaletteFor(UpdateVisual(*ui));
-            const VisualPalette upgradePalette = PaletteFor(UpgradeVisual(*ui));
-            FillRoundedPanel(dc, layout.updatePanel, updatePalette.panel,
-                updatePalette.border, ScaleForDpi(10, ui->dpi));
-            FillRoundedPanel(dc, layout.upgradePanel, upgradePalette.panel,
-                upgradePalette.border, ScaleForDpi(10, ui->dpi));
+        const int width = client.right - client.left;
+        const int height = client.bottom - client.top;
+        HDC bufferDc = CreateCompatibleDC(dc);
+        HBITMAP bufferBitmap = bufferDc ? CreateCompatibleBitmap(dc, width, height) : nullptr;
+        if (bufferDc && bufferBitmap) {
+            HGDIOBJ oldBitmap = SelectObject(bufferDc, bufferBitmap);
+            FillRect(bufferDc, &client, ui && ui->backgroundBrush ? ui->backgroundBrush :
+                reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
+            if (ui) {
+                const UiLayout layout = BuildUiLayout(ui->dpi);
+                const VisualPalette updatePalette = PaletteFor(UpdateVisual(*ui));
+                const VisualPalette upgradePalette = PaletteFor(UpgradeVisual(*ui));
+                FillRoundedPanel(bufferDc, layout.updatePanel, updatePalette.panel,
+                    updatePalette.border, ScaleForDpi(10, ui->dpi));
+                FillRoundedPanel(bufferDc, layout.upgradePanel, upgradePalette.panel,
+                    upgradePalette.border, ScaleForDpi(10, ui->dpi));
+            }
+            BitBlt(dc, 0, 0, width, height, bufferDc, 0, 0, SRCCOPY);
+            SelectObject(bufferDc, oldBitmap);
+        } else {
+            FillRect(dc, &client, ui && ui->backgroundBrush ? ui->backgroundBrush :
+                reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
+            if (ui) {
+                const UiLayout layout = BuildUiLayout(ui->dpi);
+                const VisualPalette updatePalette = PaletteFor(UpdateVisual(*ui));
+                const VisualPalette upgradePalette = PaletteFor(UpgradeVisual(*ui));
+                FillRoundedPanel(dc, layout.updatePanel, updatePalette.panel,
+                    updatePalette.border, ScaleForDpi(10, ui->dpi));
+                FillRoundedPanel(dc, layout.upgradePanel, upgradePalette.panel,
+                    upgradePalette.border, ScaleForDpi(10, ui->dpi));
+            }
         }
+        if (bufferBitmap) DeleteObject(bufferBitmap);
+        if (bufferDc) DeleteDC(bufferDc);
         EndPaint(window, &paint);
         return 0;
     }
@@ -2374,27 +2565,7 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
     case WM_DRAWITEM:
         if (ui) {
             const DRAWITEMSTRUCT& item = *reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
-            if (wParam == IDC_DISABLE || wParam == IDC_RESTORE ||
-                wParam == IDC_UPGRADE_DISABLE || wParam == IDC_UPGRADE_RESTORE) {
-                DrawOwnerButton(item);
-                return TRUE;
-            }
-            if (wParam == IDC_SYSTEM) {
-                DrawSystemInfo(item, *ui);
-                return TRUE;
-            }
-            if (wParam == IDC_STATUS) {
-                DrawUpdateStatusCard(item, *ui);
-                return TRUE;
-            }
-            if (wParam == IDC_UPGRADE_STATUS) {
-                DrawUpgradeStatusCard(item, *ui);
-                return TRUE;
-            }
-            if (wParam == IDC_WARNING) {
-                DrawWarningCard(item, *ui);
-                return TRUE;
-            }
+            if (DrawOwnerItemBuffered(item, *ui)) return TRUE;
         }
         break;
     case WM_CTLCOLORSTATIC:
@@ -2480,6 +2651,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         CoUninitialize(); return 0;
     }
     try {
+        GdiplusSession gdiplus;
         UiContext ui;
         ui.version = ReadWindowsVersion();
         ui.controller = CreateController(ui.version);

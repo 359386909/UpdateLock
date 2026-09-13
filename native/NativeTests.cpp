@@ -26,10 +26,72 @@ RECT ChildClientRect(HWND parent, int controlId) {
     return RECT{points[0].x, points[0].y, points[1].x, points[1].y};
 }
 
+struct InkBounds {
+    bool found = false;
+    int left = 0;
+    int top = 0;
+    int right = 0;
+    int bottom = 0;
+};
+
+template <typename Draw>
+InkBounds MeasureRenderedInk(int canvasSize, Draw draw) {
+    BITMAPINFO bitmapInfo = {};
+    bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bitmapInfo.bmiHeader.biWidth = canvasSize;
+    bitmapInfo.bmiHeader.biHeight = -canvasSize;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+    void* pixelData = nullptr;
+    HBITMAP bitmap = CreateDIBSection(nullptr, &bitmapInfo, DIB_RGB_COLORS,
+        &pixelData, nullptr, 0);
+    if (!bitmap || !pixelData) throw AppError(L"无法创建图标像素测试画布。" );
+    HDC dc = CreateCompatibleDC(nullptr);
+    if (!dc) {
+        DeleteObject(bitmap);
+        throw AppError(L"无法创建图标像素测试 DC。" );
+    }
+    HGDIOBJ oldBitmap = SelectObject(dc, bitmap);
+    RECT canvas = {0, 0, canvasSize, canvasSize};
+    FillRectColor(dc, canvas, RGB(255, 255, 255));
+    draw(dc, canvasSize / 2, canvasSize / 2);
+    GdiFlush();
+
+    InkBounds bounds;
+    const DWORD* pixels = static_cast<const DWORD*>(pixelData);
+    for (int y = 0; y < canvasSize; ++y) {
+        for (int x = 0; x < canvasSize; ++x) {
+            if ((pixels[static_cast<size_t>(y) * canvasSize + x] & 0x00FFFFFFu) == 0x00FFFFFFu) {
+                continue;
+            }
+            if (!bounds.found) {
+                bounds = InkBounds{true, x, y, x, y};
+            } else {
+                bounds.left = std::min(bounds.left, x);
+                bounds.top = std::min(bounds.top, y);
+                bounds.right = std::max(bounds.right, x);
+                bounds.bottom = std::max(bounds.bottom, y);
+            }
+        }
+    }
+    SelectObject(dc, oldBitmap);
+    DeleteDC(dc);
+    DeleteObject(bitmap);
+    return bounds;
+}
+
+void RequireVisibleUnclippedInk(const InkBounds& bounds, int canvasSize,
+    const wchar_t* message) {
+    Require(bounds.found && bounds.left > 0 && bounds.top > 0 &&
+        bounds.right < canvasSize - 1 && bounds.bottom < canvasSize - 1, message);
+}
+
 } // namespace
 
 int wmain() {
     try {
+        GdiplusSession gdiplus;
         wchar_t tempRoot[MAX_PATH] = {};
         if (!GetTempPathW(MAX_PATH, tempRoot)) ThrowWin32(L"获取测试临时目录");
         const std::wstring testDirectory = std::wstring(tempRoot) + L"UpdateLock-NativeTests-" +
@@ -189,6 +251,61 @@ int wmain() {
                 L"Windows 11 按钮或底部说明在 DPI 缩放后错位。" );
             Require(layout.warning.bottom <= ScaleForDpi(kUiClientHeight, layoutDpi),
                 L"底部说明超出 DPI 缩放后的客户区。" );
+
+            const int canvasSize = ScaleForDpi(48, layoutDpi);
+            const int badgeIconSize = ScaleForDpi(18, layoutDpi);
+            const InkBounds successInk = MeasureRenderedInk(canvasSize,
+                [badgeIconSize](HDC dc, int x, int y) {
+                    DrawStatusIcon(dc, x, y, badgeIconSize, StatusVisual::Success);
+                });
+            RequireVisibleUnclippedInk(successInk, canvasSize,
+                L"成功状态图标在 DPI 缩放后为空或被裁切。" );
+            Require(std::abs((successInk.right - successInk.left) -
+                (successInk.bottom - successInk.top)) <= 2,
+                L"成功状态图标在 DPI 缩放后不是正圆。" );
+            const InkBounds errorInk = MeasureRenderedInk(canvasSize,
+                [badgeIconSize](HDC dc, int x, int y) {
+                    DrawStatusIcon(dc, x, y, badgeIconSize, StatusVisual::Error);
+                });
+            RequireVisibleUnclippedInk(errorInk, canvasSize,
+                L"失败状态图标在 DPI 缩放后为空或被裁切。" );
+            const InkBounds warningInk = MeasureRenderedInk(canvasSize,
+                [badgeIconSize](HDC dc, int x, int y) {
+                    DrawStatusIcon(dc, x, y, badgeIconSize, StatusVisual::Warning);
+                });
+            RequireVisibleUnclippedInk(warningInk, canvasSize,
+                L"警告状态图标在 DPI 缩放后为空或被裁切。" );
+
+            const int identityIconSize = ScaleForDpi(36, layoutDpi);
+            const InkBounds shieldInk = MeasureRenderedInk(canvasSize,
+                [identityIconSize](HDC dc, int x, int y) {
+                    DrawUpdateShield(dc, x, y, identityIconSize, StatusVisual::Success);
+                });
+            RequireVisibleUnclippedInk(shieldInk, canvasSize,
+                L"Windows Update 盾牌在 DPI 缩放后为空或被裁切。" );
+            const InkBounds windowsInk = MeasureRenderedInk(canvasSize,
+                [identityIconSize](HDC dc, int x, int y) {
+                    DrawWindowsMark(dc, x, y, identityIconSize);
+                });
+            RequireVisibleUnclippedInk(windowsInk, canvasSize,
+                L"Windows 标志在 DPI 缩放后为空或被裁切。" );
+
+            const int buttonIconSize = ScaleForDpi(20, layoutDpi);
+            const InkBounds restoreInk = MeasureRenderedInk(canvasSize,
+                [buttonIconSize](HDC dc, int x, int y) {
+                    DrawButtonActionIcon(dc, x, y, buttonIconSize,
+                        RGB(35, 50, 69), true);
+                });
+            RequireVisibleUnclippedInk(restoreInk, canvasSize,
+                L"恢复箭头在 DPI 缩放后为空或被裁切。" );
+
+            const InkBounds blockInk = MeasureRenderedInk(canvasSize,
+                [buttonIconSize](HDC dc, int x, int y) {
+                    DrawButtonActionIcon(dc, x, y, buttonIconSize,
+                        RGB(35, 50, 69), false);
+                });
+            RequireVisibleUnclippedInk(blockInk, canvasSize,
+                L"禁止图标在 DPI 缩放后为空或被裁切。" );
         }
 
         ModernUpdateController modern(L"Windows 10");
