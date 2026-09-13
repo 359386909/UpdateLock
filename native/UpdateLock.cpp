@@ -1486,31 +1486,246 @@ struct UiContext {
     std::unique_ptr<IUpdateController> controller;
     Windows11UpgradeBlocker upgradeBlocker;
     VersionInfo version{};
+    HWND title = nullptr;
+    HWND author = nullptr;
     HWND system = nullptr;
     HWND description = nullptr;
     HWND status = nullptr;
-    HWND details = nullptr;
     HWND disableButton = nullptr;
     HWND restoreButton = nullptr;
     HWND upgradeStatus = nullptr;
-    HWND upgradeDetails = nullptr;
     HWND upgradeDisableButton = nullptr;
     HWND upgradeRestoreButton = nullptr;
     HWND warning = nullptr;
     HFONT normalFont = nullptr;
     HFONT titleFont = nullptr;
-    HFONT statusFont = nullptr;
+    HFONT cardTitleFont = nullptr;
+    HFONT badgeFont = nullptr;
+    HFONT authorFont = nullptr;
     HBRUSH backgroundBrush = nullptr;
-    HBRUSH statusBrush = nullptr;
-    HBRUSH upgradeBrush = nullptr;
-    HBRUSH warningBrush = nullptr;
-    COLORREF statusColor = RGB(0, 120, 70);
-    COLORREF upgradeStatusColor = RGB(0, 120, 70);
+    UpdateStatus updateState{StatusLevel::Enabled, L"", {}};
+    UpdateStatus upgradeState{StatusLevel::Enabled, L"", {}};
+    bool updateReadFailed = false;
+    bool upgradeReadFailed = false;
     int dpi = 96;
 };
 
 int ScaleForDpi(int value, int dpi) {
     return MulDiv(value, dpi, 96);
+}
+
+constexpr int kUiClientWidth = 700;
+constexpr int kUiClientHeight = 686;
+
+struct UiLayout {
+    RECT title;
+    RECT author;
+    RECT system;
+    RECT description;
+    RECT updatePanel;
+    RECT updateCard;
+    RECT disableButton;
+    RECT restoreButton;
+    RECT upgradePanel;
+    RECT upgradeCard;
+    RECT upgradeDisableButton;
+    RECT upgradeRestoreButton;
+    RECT warning;
+};
+
+RECT ScaleRect(int left, int top, int right, int bottom, int dpi) {
+    return RECT{ScaleForDpi(left, dpi), ScaleForDpi(top, dpi),
+        ScaleForDpi(right, dpi), ScaleForDpi(bottom, dpi)};
+}
+
+UiLayout BuildUiLayout(int dpi) {
+    return UiLayout{
+        ScaleRect(28, 14, 520, 50, dpi),
+        ScaleRect(524, 23, 668, 47, dpi),
+        ScaleRect(24, 55, 676, 95, dpi),
+        ScaleRect(28, 101, 672, 136, dpi),
+        ScaleRect(20, 142, 680, 354, dpi),
+        ScaleRect(32, 153, 668, 299, dpi),
+        ScaleRect(32, 304, 342, 344, dpi),
+        ScaleRect(358, 304, 668, 344, dpi),
+        ScaleRect(20, 368, 680, 552, dpi),
+        ScaleRect(32, 379, 668, 497, dpi),
+        ScaleRect(32, 502, 342, 542, dpi),
+        ScaleRect(358, 502, 668, 542, dpi),
+        ScaleRect(20, 566, 680, 676, dpi)};
+}
+
+enum class StatusVisual { Neutral, Success, Warning, Error };
+
+struct VisualPalette {
+    COLORREF foreground;
+    COLORREF background;
+    COLORREF border;
+    COLORREF panel;
+};
+
+VisualPalette PaletteFor(StatusVisual visual) {
+    switch (visual) {
+    case StatusVisual::Success:
+        return {RGB(0, 118, 68), RGB(229, 247, 237), RGB(184, 222, 199), RGB(244, 251, 247)};
+    case StatusVisual::Warning:
+        return {RGB(183, 96, 0), RGB(255, 243, 218), RGB(240, 202, 132), RGB(255, 250, 240)};
+    case StatusVisual::Error:
+        return {RGB(185, 32, 48), RGB(254, 232, 235), RGB(241, 187, 195), RGB(255, 246, 247)};
+    case StatusVisual::Neutral:
+    default:
+        return {RGB(69, 85, 103), RGB(239, 243, 248), RGB(208, 218, 228), RGB(245, 249, 253)};
+    }
+}
+
+StatusVisual VisualForLevel(StatusLevel level) {
+    if (level == StatusLevel::Disabled) return StatusVisual::Success;
+    if (level == StatusLevel::PartiallyDisabled) return StatusVisual::Warning;
+    return StatusVisual::Error;
+}
+
+StatusVisual UpdateVisual(const UiContext& ui) {
+    return ui.updateReadFailed ? StatusVisual::Error : VisualForLevel(ui.updateState.level);
+}
+
+StatusVisual UpgradeVisual(const UiContext& ui) {
+    if (ui.upgradeReadFailed) return StatusVisual::Error;
+    return IsWindows10Desktop(ui.version) ? VisualForLevel(ui.upgradeState.level) : StatusVisual::Neutral;
+}
+
+std::wstring UpdateHeaderState(const UiContext& ui) {
+    if (ui.updateReadFailed) return L"读取失败";
+    if (ui.updateState.level == StatusLevel::Disabled) return L"已完全关闭";
+    if (ui.updateState.level == StatusLevel::PartiallyDisabled) return L"部分关闭";
+    return L"未关闭";
+}
+
+std::wstring UpgradeHeaderState(const UiContext& ui) {
+    if (ui.upgradeReadFailed) return L"读取失败";
+    if (!IsWindows10Desktop(ui.version)) {
+        const size_t separator = ui.upgradeState.title.find(L'：');
+        return separator == std::wstring::npos ? ui.upgradeState.title :
+            ui.upgradeState.title.substr(separator + 1);
+    }
+    if (ui.upgradeState.level == StatusLevel::Disabled) return L"已阻止";
+    if (ui.upgradeState.level == StatusLevel::PartiallyDisabled) return L"部分配置";
+    return L"未阻止";
+}
+
+struct StatusRow {
+    std::wstring label;
+    std::wstring value;
+    StatusVisual visual = StatusVisual::Neutral;
+    bool badge = true;
+};
+
+std::wstring TrimDisplayText(const std::wstring& text) {
+    size_t first = 0;
+    while (first < text.size() && iswspace(text[first])) ++first;
+    size_t last = text.size();
+    while (last > first && iswspace(text[last - 1])) --last;
+    return text.substr(first, last - first);
+}
+
+bool IsStatusMarker(wchar_t value) {
+    return value == L'√' || value == L'×' || value == L'—';
+}
+
+StatusVisual VisualForMarker(wchar_t marker) {
+    if (marker == L'√') return StatusVisual::Success;
+    if (marker == L'×') return StatusVisual::Error;
+    return StatusVisual::Neutral;
+}
+
+std::vector<StatusRow> BuildUpdateRows(const UpdateStatus& status) {
+    std::vector<StatusRow> rows;
+    for (const std::wstring& line : status.details) {
+        size_t marker = 0;
+        while (marker < line.size()) {
+            while (marker < line.size() && !IsStatusMarker(line[marker])) ++marker;
+            if (marker >= line.size()) break;
+            size_t next = marker + 1;
+            while (next < line.size() && !IsStatusMarker(line[next])) ++next;
+            std::wstring item = TrimDisplayText(line.substr(marker + 1, next - marker - 1));
+            const size_t separator = item.find(L'：');
+            if (separator != std::wstring::npos) {
+                StatusRow row;
+                row.label = TrimDisplayText(item.substr(0, separator));
+                row.value = TrimDisplayText(item.substr(separator + 1));
+                row.visual = VisualForMarker(line[marker]);
+                if (row.label == L"Windows Update 手动访问") {
+                    row.label = L"Windows Update 手动检查、下载和安装";
+                    if (row.value == L"未禁用") row.value = L"可用";
+                }
+                rows.push_back(row);
+            }
+            marker = next;
+        }
+    }
+    return rows;
+}
+
+std::vector<StatusRow> BuildUpgradeRows(const UiContext& ui) {
+    std::vector<StatusRow> rows;
+    for (const std::wstring& detail : ui.upgradeState.details) {
+        StatusRow row;
+        const size_t separator = detail.find(L'：');
+        if (separator == std::wstring::npos) {
+            row.label = detail;
+            row.badge = false;
+            row.visual = ui.upgradeReadFailed ? StatusVisual::Error : UpgradeVisual(ui);
+            rows.push_back(row);
+            continue;
+        }
+        row.label = TrimDisplayText(detail.substr(0, separator));
+        row.value = TrimDisplayText(detail.substr(separator + 1));
+        row.badge = row.label == L"锁定版本" || row.label == L"目标产品" ||
+            row.value == L"未达到目标";
+        row.visual = StatusVisual::Neutral;
+        if (row.label == L"目标产品") {
+            row.label = L"锁定版本";
+            if (row.value == L"未配置") row.value = L"未锁定";
+            row.badge = true;
+            row.visual = StatusVisual::Error;
+        } else if (row.label == L"锁定版本") {
+            row.visual = ui.upgradeState.level == StatusLevel::Disabled ?
+                StatusVisual::Success : StatusVisual::Error;
+        } else if (row.value == L"未达到目标") {
+            row.visual = StatusVisual::Error;
+        }
+        rows.push_back(row);
+    }
+    return rows;
+}
+
+struct SystemDisplayInfo {
+    std::wstring system;
+    std::wstring feature;
+    std::wstring build;
+};
+
+SystemDisplayInfo BuildSystemDisplayInfo(const VersionInfo& version,
+    const std::wstring& displayName) {
+    SystemDisplayInfo result{displayName, L"不适用", std::to_wstring(version.build)};
+    if (IsWindows10Desktop(version)) {
+        try {
+            const Windows10VersionInfo detected = Windows10VersionDetector::Detect(version);
+            if (detected.known) {
+                result.feature = detected.functionalVersion;
+                if (detected.source == Windows10VersionSource::BuildMapping) result.feature += L"（Build 识别）";
+            } else {
+                result.feature = L"无法识别";
+            }
+        } catch (const AppError&) {
+            result.feature = L"无法识别";
+        }
+    }
+    return result;
+}
+
+std::wstring BuildSystemLabel(const VersionInfo& version, const std::wstring& displayName) {
+    const SystemDisplayInfo info = BuildSystemDisplayInfo(version, displayName);
+    return L"当前系统：" + info.system + L"；功能版本：" + info.feature + L"；Build：" + info.build;
 }
 
 void FillRoundedPanel(HDC dc, const RECT& rect, COLORREF fill, COLORREF border,
@@ -1526,30 +1741,118 @@ void FillRoundedPanel(HDC dc, const RECT& rect, COLORREF fill, COLORREF border,
     DeleteObject(brush);
 }
 
+void FillRectColor(HDC dc, const RECT& rect, COLORREF color) {
+    HBRUSH brush = CreateSolidBrush(color);
+    FillRect(dc, &rect, brush);
+    DeleteObject(brush);
+}
+
+void DrawStatusIcon(HDC dc, int centerX, int centerY, int size,
+    StatusVisual visual) {
+    const VisualPalette palette = PaletteFor(visual);
+    const int half = size / 2;
+    HPEN shapePen = CreatePen(PS_SOLID, 1, palette.foreground);
+    HBRUSH shapeBrush = CreateSolidBrush(palette.foreground);
+    HGDIOBJ oldPen = SelectObject(dc, shapePen);
+    HGDIOBJ oldBrush = SelectObject(dc, shapeBrush);
+    if (visual == StatusVisual::Warning) {
+        POINT points[3] = {{centerX, centerY - half},
+            {centerX - half, centerY + half}, {centerX + half, centerY + half}};
+        Polygon(dc, points, 3);
+    } else {
+        Ellipse(dc, centerX - half, centerY - half, centerX + half, centerY + half);
+    }
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(shapeBrush);
+    DeleteObject(shapePen);
+
+    const int stroke = std::max(1, size / 8);
+    HPEN markPen = CreatePen(PS_SOLID, stroke, RGB(255, 255, 255));
+    oldPen = SelectObject(dc, markPen);
+    if (visual == StatusVisual::Success) {
+        MoveToEx(dc, centerX - size / 4, centerY, nullptr);
+        LineTo(dc, centerX - size / 16, centerY + size / 5);
+        LineTo(dc, centerX + size / 3, centerY - size / 4);
+    } else if (visual == StatusVisual::Error) {
+        MoveToEx(dc, centerX - size / 4, centerY - size / 4, nullptr);
+        LineTo(dc, centerX + size / 4, centerY + size / 4);
+        MoveToEx(dc, centerX + size / 4, centerY - size / 4, nullptr);
+        LineTo(dc, centerX - size / 4, centerY + size / 4);
+    } else if (visual == StatusVisual::Warning) {
+        MoveToEx(dc, centerX, centerY - size / 5, nullptr);
+        LineTo(dc, centerX, centerY + size / 7);
+        MoveToEx(dc, centerX, centerY + size / 3, nullptr);
+        LineTo(dc, centerX, centerY + size / 3 + 1);
+    } else {
+        MoveToEx(dc, centerX - size / 4, centerY, nullptr);
+        LineTo(dc, centerX + size / 4, centerY);
+    }
+    SelectObject(dc, oldPen);
+    DeleteObject(markPen);
+}
+
+void DrawButtonActionIcon(HDC dc, int centerX, int centerY, int size,
+    COLORREF color, bool restore) {
+    HPEN pen = CreatePen(PS_SOLID, std::max(1, size / 8), color);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+    if (restore) {
+        Arc(dc, centerX - size / 2, centerY - size / 2,
+            centerX + size / 2, centerY + size / 2,
+            centerX - size / 2, centerY, centerX, centerY - size / 2);
+        MoveToEx(dc, centerX - size / 2, centerY, nullptr);
+        LineTo(dc, centerX - size / 5, centerY - size / 4);
+        MoveToEx(dc, centerX - size / 2, centerY, nullptr);
+        LineTo(dc, centerX - size / 5, centerY + size / 4);
+    } else {
+        Ellipse(dc, centerX - size / 2, centerY - size / 2,
+            centerX + size / 2, centerY + size / 2);
+        MoveToEx(dc, centerX - size / 3, centerY + size / 3, nullptr);
+        LineTo(dc, centerX + size / 3, centerY - size / 3);
+    }
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(pen);
+}
+
 void DrawOwnerButton(const DRAWITEMSTRUCT& item) {
     wchar_t text[160] = {};
     GetWindowTextW(item.hwndItem, text, static_cast<int>(std::size(text)));
     const bool primary = item.CtlID == IDC_DISABLE || item.CtlID == IDC_UPGRADE_DISABLE;
+    const bool restore = item.CtlID == IDC_RESTORE || item.CtlID == IDC_UPGRADE_RESTORE;
     const bool disabled = (item.itemState & ODS_DISABLED) != 0;
     const bool pressed = (item.itemState & ODS_SELECTED) != 0;
-    COLORREF fill = primary ? RGB(20, 112, 194) : RGB(255, 255, 255);
-    COLORREF border = primary ? RGB(20, 112, 194) : RGB(181, 190, 201);
-    COLORREF foreground = primary ? RGB(255, 255, 255) : RGB(38, 50, 64);
+    COLORREF fill = primary ? RGB(0, 103, 192) : RGB(255, 255, 255);
+    COLORREF border = primary ? RGB(0, 103, 192) : RGB(178, 190, 203);
+    COLORREF foreground = primary ? RGB(255, 255, 255) : RGB(35, 50, 69);
     if (pressed && !disabled) {
-        fill = primary ? RGB(13, 86, 151) : RGB(233, 238, 244);
+        fill = primary ? RGB(0, 83, 158) : RGB(235, 240, 246);
     }
     if (disabled) {
-        fill = RGB(239, 242, 246);
-        border = RGB(211, 217, 224);
-        foreground = RGB(145, 153, 163);
+        fill = RGB(240, 243, 247);
+        border = RGB(211, 218, 226);
+        foreground = RGB(145, 153, 164);
     }
     RECT rect = item.rcItem;
-    FillRoundedPanel(item.hDC, rect, fill, border, 10);
+    const int buttonHeight = static_cast<int>(rect.bottom - rect.top);
+    FillRoundedPanel(item.hDC, rect, fill, border, std::max(6, buttonHeight / 5));
     SetBkMode(item.hDC, TRANSPARENT);
     SetTextColor(item.hDC, foreground);
     HGDIOBJ oldFont = SelectObject(item.hDC,
         reinterpret_cast<HGDIOBJ>(SendMessageW(item.hwndItem, WM_GETFONT, 0, 0)));
-    DrawTextW(item.hDC, text, -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SIZE textSize = {};
+    GetTextExtentPoint32W(item.hDC, text, static_cast<int>(wcslen(text)), &textSize);
+    const int iconSize = std::max(16, buttonHeight / 2 - 2);
+    const int gap = iconSize / 2;
+    const int groupWidth = iconSize + gap + textSize.cx;
+    const int offset = pressed && !disabled ? 1 : 0;
+    const int iconX = rect.left + (rect.right - rect.left - groupWidth) / 2 + iconSize / 2 + offset;
+    const int centerY = (rect.top + rect.bottom) / 2 + offset;
+    DrawButtonActionIcon(item.hDC, iconX, centerY, iconSize, foreground, restore);
+    RECT textRect = {iconX + iconSize / 2 + gap, rect.top + offset,
+        rect.right, rect.bottom + offset};
+    DrawTextW(item.hDC, text, -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     SelectObject(item.hDC, oldFont);
     if ((item.itemState & ODS_FOCUS) && !disabled) {
         RECT focus = rect;
@@ -1562,70 +1865,268 @@ void SetControlFont(HWND control, HFONT font) {
     SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 }
 
-std::wstring JoinDetails(const std::vector<std::wstring>& details) {
-    std::wstring result;
-    for (size_t i = 0; i < details.size(); ++i) {
-        if (i) result += L"\r\n";
-        result += details[i];
-    }
-    return result;
+int MeasureTextWidth(HDC dc, const std::wstring& text) {
+    SIZE size = {};
+    GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &size);
+    return size.cx;
 }
 
-std::wstring BuildSystemLabel(const VersionInfo& version, const std::wstring& displayName) {
-    std::wstring result = L"当前系统：" + displayName;
-    if (IsWindows10Desktop(version)) {
-        try {
-            const Windows10VersionInfo detected = Windows10VersionDetector::Detect(version);
-            if (detected.known) {
-                result += L"  功能版本：" + detected.functionalVersion;
-                if (detected.source == Windows10VersionSource::BuildMapping) result += L"（根据 Build 识别）";
-            }
-        } catch (const AppError&) {
-            // Keep startup usable; the upgrade panel reports detailed detection errors.
+void DrawCardHeader(HDC dc, const UiContext& ui, const RECT& bounds,
+    const std::wstring& prefix, const std::wstring& state, StatusVisual visual) {
+    const int pad = ScaleForDpi(12, ui.dpi);
+    const int iconSize = ScaleForDpi(20, ui.dpi);
+    HGDIOBJ oldFont = SelectObject(dc, ui.cardTitleFont);
+    SetBkMode(dc, TRANSPARENT);
+    TEXTMETRICW metrics = {};
+    GetTextMetricsW(dc, &metrics);
+    const int y = bounds.top + (bounds.bottom - bounds.top - metrics.tmHeight) / 2;
+    int x = bounds.left + pad;
+    SetTextColor(dc, RGB(24, 35, 50));
+    TextOutW(dc, x, y, prefix.c_str(), static_cast<int>(prefix.size()));
+    x += MeasureTextWidth(dc, prefix);
+    const VisualPalette palette = PaletteFor(visual);
+    SetTextColor(dc, palette.foreground);
+    TextOutW(dc, x, y, state.c_str(), static_cast<int>(state.size()));
+    x += MeasureTextWidth(dc, state) + ScaleForDpi(10, ui.dpi) + iconSize / 2;
+    x = std::min(x, static_cast<int>(bounds.right) - pad - iconSize / 2);
+    DrawStatusIcon(dc, x, (bounds.top + bounds.bottom) / 2, iconSize, visual);
+    SelectObject(dc, oldFont);
+}
+
+void DrawStatusBadge(HDC dc, const UiContext& ui, const RECT& bounds,
+    const std::wstring& text, StatusVisual visual) {
+    const VisualPalette palette = PaletteFor(visual);
+    const int badgeHeight = static_cast<int>(bounds.bottom - bounds.top);
+    FillRoundedPanel(dc, bounds, palette.background, palette.border,
+        std::max(8, badgeHeight));
+    HGDIOBJ oldFont = SelectObject(dc, ui.badgeFont);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, palette.foreground);
+    const int iconSize = std::max(12, badgeHeight - ScaleForDpi(8, ui.dpi));
+    const int iconX = bounds.right - ScaleForDpi(13, ui.dpi) - iconSize / 2;
+    RECT textRect = {bounds.left + ScaleForDpi(10, ui.dpi), bounds.top,
+        iconX - iconSize / 2 - ScaleForDpi(5, ui.dpi), bounds.bottom};
+    DrawTextW(dc, text.c_str(), -1, &textRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    DrawStatusIcon(dc, iconX, (bounds.top + bounds.bottom) / 2, iconSize, visual);
+    SelectObject(dc, oldFont);
+}
+
+void DrawSystemChip(HDC dc, const UiContext& ui, const RECT& bounds,
+    const std::wstring& label, const std::wstring& value) {
+    FillRoundedPanel(dc, bounds, RGB(248, 250, 253), RGB(218, 225, 233),
+        ScaleForDpi(8, ui.dpi));
+    HGDIOBJ oldFont = SelectObject(dc, ui.normalFont);
+    SetBkMode(dc, TRANSPARENT);
+    const int x = bounds.left + ScaleForDpi(12, ui.dpi);
+    RECT textRect = {x, bounds.top, bounds.right - ScaleForDpi(10, ui.dpi), bounds.bottom};
+    SetTextColor(dc, RGB(91, 103, 117));
+    DrawTextW(dc, label.c_str(), -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    textRect.left += MeasureTextWidth(dc, label) + ScaleForDpi(5, ui.dpi);
+    SetTextColor(dc, RGB(31, 45, 62));
+    DrawTextW(dc, value.c_str(), -1, &textRect,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SelectObject(dc, oldFont);
+}
+
+void DrawSystemInfo(const DRAWITEMSTRUCT& item, const UiContext& ui) {
+    const SystemDisplayInfo info = BuildSystemDisplayInfo(ui.version, ui.controller->DisplayName());
+    const RECT client = item.rcItem;
+    FillRectColor(item.hDC, client, RGB(247, 249, 252));
+    const int top = ScaleForDpi(2, ui.dpi);
+    const int bottom = client.bottom - ScaleForDpi(2, ui.dpi);
+    const int gap = ScaleForDpi(10, ui.dpi);
+    const int firstWidth = ScaleForDpi(226, ui.dpi);
+    const int secondWidth = ScaleForDpi(194, ui.dpi);
+    const int thirdWidth = ScaleForDpi(172, ui.dpi);
+    RECT first = {0, top, firstWidth, bottom};
+    RECT second = {first.right + gap, top, first.right + gap + secondWidth, bottom};
+    RECT third = {second.right + gap, top, second.right + gap + thirdWidth, bottom};
+    DrawSystemChip(item.hDC, ui, first, L"当前系统：", info.system);
+    DrawSystemChip(item.hDC, ui, second, L"功能版本：", info.feature);
+    DrawSystemChip(item.hDC, ui, third, L"Build：", info.build);
+}
+
+void DrawUpdateStatusCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
+    const StatusVisual visual = UpdateVisual(ui);
+    const VisualPalette palette = PaletteFor(visual);
+    FillRectColor(item.hDC, item.rcItem, palette.panel);
+    RECT header = item.rcItem;
+    header.bottom = header.top + ScaleForDpi(36, ui.dpi);
+    DrawCardHeader(item.hDC, ui, header, L"Windows 更新状态：", UpdateHeaderState(ui), visual);
+
+    std::vector<StatusRow> rows = BuildUpdateRows(ui.updateState);
+    if (rows.empty()) {
+        rows.push_back(StatusRow{ui.updateState.details.empty() ? L"无法读取状态详情" :
+            ui.updateState.details.front(), L"", StatusVisual::Error, false});
+    }
+    if (rows.size() > 5) rows.resize(5);
+    RECT body = {item.rcItem.left + ScaleForDpi(6, ui.dpi), header.bottom + ScaleForDpi(2, ui.dpi),
+        item.rcItem.right - ScaleForDpi(6, ui.dpi), item.rcItem.bottom};
+    FillRoundedPanel(item.hDC, body, RGB(255, 255, 255), RGB(226, 232, 238), ScaleForDpi(7, ui.dpi));
+    const int rowHeight = (body.bottom - body.top) / static_cast<int>(rows.size());
+    HGDIOBJ oldFont = SelectObject(item.hDC, ui.normalFont);
+    SetBkMode(item.hDC, TRANSPARENT);
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const int top = body.top + static_cast<int>(i) * rowHeight;
+        const int bottom = i + 1 == rows.size() ? body.bottom : top + rowHeight;
+        RECT labelRect = {body.left + ScaleForDpi(14, ui.dpi), top,
+            body.right - ScaleForDpi(184, ui.dpi), bottom};
+        SetTextColor(item.hDC, RGB(35, 49, 66));
+        DrawTextW(item.hDC, rows[i].label.c_str(), -1, &labelRect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (rows[i].badge) {
+            RECT badge = {body.right - ScaleForDpi(174, ui.dpi), top + ScaleForDpi(2, ui.dpi),
+                body.right - ScaleForDpi(10, ui.dpi), bottom - ScaleForDpi(2, ui.dpi)};
+            DrawStatusBadge(item.hDC, ui, badge, rows[i].value, rows[i].visual);
+        }
+        if (i + 1 < rows.size()) {
+            HPEN divider = CreatePen(PS_SOLID, 1, RGB(233, 237, 242));
+            HGDIOBJ oldPen = SelectObject(item.hDC, divider);
+            MoveToEx(item.hDC, body.left + ScaleForDpi(14, ui.dpi), bottom, nullptr);
+            LineTo(item.hDC, body.right - ScaleForDpi(14, ui.dpi), bottom);
+            SelectObject(item.hDC, oldPen);
+            DeleteObject(divider);
         }
     }
-    result += L"  Build：" + std::to_wstring(version.build);
+    SelectObject(item.hDC, oldFont);
+}
+
+void DrawUpgradeStatusCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
+    const StatusVisual visual = UpgradeVisual(ui);
+    const VisualPalette palette = PaletteFor(visual);
+    FillRectColor(item.hDC, item.rcItem, palette.panel);
+    RECT header = item.rcItem;
+    header.bottom = header.top + ScaleForDpi(35, ui.dpi);
+    DrawCardHeader(item.hDC, ui, header, L"Windows 11 升级状态：", UpgradeHeaderState(ui), visual);
+
+    std::vector<StatusRow> rows = BuildUpgradeRows(ui);
+    if (rows.empty()) rows.push_back(StatusRow{L"暂无状态详情", L"", StatusVisual::Neutral, false});
+    if (rows.size() > 4) rows.resize(4);
+    RECT body = {item.rcItem.left + ScaleForDpi(6, ui.dpi), header.bottom + ScaleForDpi(1, ui.dpi),
+        item.rcItem.right - ScaleForDpi(6, ui.dpi), item.rcItem.bottom};
+    FillRoundedPanel(item.hDC, body, RGB(255, 255, 255), RGB(226, 232, 238), ScaleForDpi(7, ui.dpi));
+    const int rowHeight = (body.bottom - body.top) / static_cast<int>(rows.size());
+    HGDIOBJ oldFont = SelectObject(item.hDC, ui.normalFont);
+    SetBkMode(item.hDC, TRANSPARENT);
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const int top = body.top + static_cast<int>(i) * rowHeight;
+        const int bottom = i + 1 == rows.size() ? body.bottom : top + rowHeight;
+        if (rows[i].value.empty()) {
+            RECT lineRect = {body.left + ScaleForDpi(14, ui.dpi), top,
+                body.right - ScaleForDpi(14, ui.dpi), bottom};
+            SetTextColor(item.hDC, rows[i].visual == StatusVisual::Error ?
+                PaletteFor(StatusVisual::Error).foreground : RGB(74, 88, 104));
+            DrawTextW(item.hDC, rows[i].label.c_str(), -1, &lineRect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        } else {
+            RECT labelRect = {body.left + ScaleForDpi(14, ui.dpi), top,
+                body.left + ScaleForDpi(145, ui.dpi), bottom};
+            SetTextColor(item.hDC, RGB(75, 88, 104));
+            DrawTextW(item.hDC, rows[i].label.c_str(), -1, &labelRect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (rows[i].badge) {
+                HGDIOBJ badgeMeasureFont = SelectObject(item.hDC, ui.badgeFont);
+                int badgeWidth = MeasureTextWidth(item.hDC, rows[i].value) + ScaleForDpi(54, ui.dpi);
+                SelectObject(item.hDC, badgeMeasureFont);
+                badgeWidth = std::max(ScaleForDpi(112, ui.dpi),
+                    std::min(ScaleForDpi(255, ui.dpi), badgeWidth));
+                RECT badge = {body.right - ScaleForDpi(10, ui.dpi) - badgeWidth,
+                    top + ScaleForDpi(2, ui.dpi), body.right - ScaleForDpi(10, ui.dpi),
+                    bottom - ScaleForDpi(2, ui.dpi)};
+                DrawStatusBadge(item.hDC, ui, badge, rows[i].value, rows[i].visual);
+            } else {
+                RECT valueRect = {body.left + ScaleForDpi(146, ui.dpi), top,
+                    body.right - ScaleForDpi(12, ui.dpi), bottom};
+                SetTextColor(item.hDC, RGB(31, 45, 62));
+                DrawTextW(item.hDC, rows[i].value.c_str(), -1, &valueRect,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
+        }
+        if (i + 1 < rows.size()) {
+            HPEN divider = CreatePen(PS_SOLID, 1, RGB(233, 237, 242));
+            HGDIOBJ oldPen = SelectObject(item.hDC, divider);
+            MoveToEx(item.hDC, body.left + ScaleForDpi(14, ui.dpi), bottom, nullptr);
+            LineTo(item.hDC, body.right - ScaleForDpi(14, ui.dpi), bottom);
+            SelectObject(item.hDC, oldPen);
+            DeleteObject(divider);
+        }
+    }
+    SelectObject(item.hDC, oldFont);
+}
+
+const wchar_t* const kUiWarningText =
+    L"注意：\r\n"
+    L"1. 关闭后将禁用自动更新、更新通知、驱动更新和手动更新入口。\r\n"
+    L"2. 如需更新系统，请先点击“恢复到运行前状态”。\r\n"
+    L"3. 禁止升级到 Windows 11 仅对 Windows 10 生效。\r\n"
+    L"4. 本工具不修改 TPM、Secure Boot 或硬件兼容性检查。";
+
+void DrawWarningCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
+    FillRoundedPanel(item.hDC, item.rcItem, RGB(255, 249, 235), RGB(235, 196, 102),
+        ScaleForDpi(9, ui.dpi));
+    const int left = item.rcItem.left + ScaleForDpi(18, ui.dpi);
+    const int titleTop = item.rcItem.top + ScaleForDpi(9, ui.dpi);
+    DrawStatusIcon(item.hDC, left + ScaleForDpi(9, ui.dpi), titleTop + ScaleForDpi(10, ui.dpi),
+        ScaleForDpi(18, ui.dpi), StatusVisual::Warning);
+    HGDIOBJ oldFont = SelectObject(item.hDC, ui.badgeFont);
+    SetBkMode(item.hDC, TRANSPARENT);
+    SetTextColor(item.hDC, RGB(164, 87, 0));
+    RECT titleRect = {left + ScaleForDpi(27, ui.dpi), titleTop,
+        item.rcItem.right - ScaleForDpi(14, ui.dpi), titleTop + ScaleForDpi(22, ui.dpi)};
+    DrawTextW(item.hDC, L"注意：", -1, &titleRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(item.hDC, ui.normalFont);
+    SetTextColor(item.hDC, RGB(91, 67, 25));
+    const std::array<const wchar_t*, 4> lines = {{
+        L"1. 关闭后将禁用自动更新、更新通知、驱动更新和手动更新入口。",
+        L"2. 如需更新系统，请先点击“恢复到运行前状态”。",
+        L"3. 禁止升级到 Windows 11 仅对 Windows 10 生效。",
+        L"4. 本工具不修改 TPM、Secure Boot 或硬件兼容性检查。"}};
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const int top = item.rcItem.top + ScaleForDpi(31 + static_cast<int>(i) * 18, ui.dpi);
+        RECT lineRect = {left + ScaleForDpi(27, ui.dpi), top,
+            item.rcItem.right - ScaleForDpi(14, ui.dpi), top + ScaleForDpi(18, ui.dpi)};
+        DrawTextW(item.hDC, lines[i], -1, &lineRect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+    SelectObject(item.hDC, oldFont);
+}
+
+std::wstring BuildAccessibleStatusText(const std::wstring& header,
+    const std::vector<StatusRow>& rows) {
+    std::wstring result = header;
+    for (const StatusRow& row : rows) {
+        result += L"；" + row.label;
+        if (!row.value.empty()) result += L"：" + row.value;
+    }
     return result;
 }
 
 void RefreshUi(HWND window, UiContext& ui) {
-    (void)window;
     try {
-        const UpdateStatus status = ui.controller->GetStatus();
-        SetWindowTextW(ui.status, (L"状态：" + status.title).c_str());
-        SetWindowTextW(ui.details, JoinDetails(status.details).c_str());
-        ui.statusColor = status.level == StatusLevel::Disabled ? RGB(0, 120, 70) :
-                         status.level == StatusLevel::PartiallyDisabled ? RGB(184, 108, 0) : RGB(170, 38, 38);
-        EnableWindow(ui.restoreButton, ui.controller->CanRestore() ? TRUE : FALSE);
-        InvalidateRect(ui.status, nullptr, TRUE);
+        ui.updateState = ui.controller->GetStatus();
+        ui.updateReadFailed = false;
     } catch (const AppError& error) {
-        SetWindowTextW(ui.status, L"状态：× 状态读取失败");
-        SetWindowTextW(ui.details, error.message.c_str());
-        ui.statusColor = RGB(170, 38, 38);
-        EnableWindow(ui.restoreButton, ui.controller->CanRestore() ? TRUE : FALSE);
-        InvalidateRect(ui.status, nullptr, TRUE);
+        ui.updateState = UpdateStatus{StatusLevel::Enabled, L"状态读取失败", {error.message}};
+        ui.updateReadFailed = true;
     }
+    EnableWindow(ui.restoreButton, ui.controller->CanRestore() ? TRUE : FALSE);
+    SetWindowTextW(ui.status, BuildAccessibleStatusText(
+        L"Windows 更新状态：" + UpdateHeaderState(ui), BuildUpdateRows(ui.updateState)).c_str());
 
     try {
-        const UpdateStatus status = ui.upgradeBlocker.GetStatus(ui.version);
-        const std::wstring title = IsWindows10Desktop(ui.version)
-            ? std::wstring(status.level == StatusLevel::Disabled ? L"√ " : L"× ") + status.title
-            : status.title;
-        SetWindowTextW(ui.upgradeStatus, title.c_str());
-        SetWindowTextW(ui.upgradeDetails, JoinDetails(status.details).c_str());
-        ui.upgradeStatusColor = status.level == StatusLevel::Disabled ? RGB(0, 120, 70) :
-            status.level == StatusLevel::PartiallyDisabled ? RGB(184, 108, 0) : RGB(38, 91, 135);
-        EnableWindow(ui.upgradeDisableButton, IsWindows10Desktop(ui.version) ? TRUE : FALSE);
-        EnableWindow(ui.upgradeRestoreButton, ui.upgradeBlocker.CanRestore(ui.version) ? TRUE : FALSE);
-        InvalidateRect(ui.upgradeStatus, nullptr, TRUE);
+        ui.upgradeState = ui.upgradeBlocker.GetStatus(ui.version);
+        ui.upgradeReadFailed = false;
     } catch (const AppError& error) {
-        SetWindowTextW(ui.upgradeStatus, L"× Windows 11 升级状态：读取失败");
-        SetWindowTextW(ui.upgradeDetails, error.message.c_str());
-        ui.upgradeStatusColor = RGB(170, 38, 38);
-        EnableWindow(ui.upgradeDisableButton, FALSE);
-        EnableWindow(ui.upgradeRestoreButton, FALSE);
-        InvalidateRect(ui.upgradeStatus, nullptr, TRUE);
+        ui.upgradeState = UpdateStatus{StatusLevel::Enabled, L"Windows 11 升级状态：读取失败", {error.message}};
+        ui.upgradeReadFailed = true;
     }
+    EnableWindow(ui.upgradeDisableButton, IsWindows10Desktop(ui.version) ? TRUE : FALSE);
+    EnableWindow(ui.upgradeRestoreButton, ui.upgradeBlocker.CanRestore(ui.version) ? TRUE : FALSE);
+    SetWindowTextW(ui.upgradeStatus, BuildAccessibleStatusText(
+        L"Windows 11 升级状态：" + UpgradeHeaderState(ui), BuildUpgradeRows(ui)).c_str());
+    InvalidateRect(ui.status, nullptr, FALSE);
+    InvalidateRect(ui.upgradeStatus, nullptr, FALSE);
+    InvalidateRect(window, nullptr, TRUE);
 }
 
 void ShowOperationResult(HWND owner, const OperationResult& result) {
@@ -1648,61 +2149,83 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
         const int dpi = GetDeviceCaps(windowDc, LOGPIXELSY);
         ReleaseDC(window, windowDc);
         ui->dpi = dpi;
-        ui->backgroundBrush = CreateSolidBrush(RGB(246, 248, 251));
-        ui->statusBrush = CreateSolidBrush(RGB(244, 250, 247));
-        ui->upgradeBrush = CreateSolidBrush(RGB(244, 248, 252));
-        ui->warningBrush = CreateSolidBrush(RGB(255, 249, 235));
-        if (!ui->backgroundBrush || !ui->statusBrush || !ui->upgradeBrush || !ui->warningBrush) {
-            ThrowWin32(L"创建界面画刷");
-        }
-        const auto scale = [dpi](int value) { return ScaleForDpi(value, dpi); };
+        ui->backgroundBrush = CreateSolidBrush(RGB(247, 249, 252));
+        if (!ui->backgroundBrush) ThrowWin32(L"创建界面画刷");
+        const UiLayout layout = BuildUiLayout(dpi);
         ui->normalFont = CreateFontW(-MulDiv(9, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-        ui->titleFont = CreateFontW(-MulDiv(16, dpi, 72), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        ui->titleFont = CreateFontW(-MulDiv(17, dpi, 72), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-        ui->statusFont = CreateFontW(-MulDiv(12, dpi, 72), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        ui->cardTitleFont = CreateFontW(-MulDiv(13, dpi, 72), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+        ui->badgeFont = CreateFontW(-MulDiv(9, dpi, 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+        ui->authorFont = CreateFontW(-MulDiv(8, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+        if (!ui->normalFont || !ui->titleFont || !ui->cardTitleFont ||
+            !ui->badgeFont || !ui->authorFont) ThrowWin32(L"创建界面字体");
 
-        HWND title = CreateWindowExW(0, L"STATIC", kAppName, WS_CHILD | WS_VISIBLE,
-            scale(30), scale(21), scale(435), scale(39), window, nullptr, nullptr, nullptr);
-        HWND author = CreateWindowExW(0, L"STATIC", L"作者：啊常用户", WS_CHILD | WS_VISIBLE | SS_RIGHT,
-            scale(465), scale(30), scale(140), scale(24), window, nullptr, nullptr, nullptr);
-        ui->system = CreateWindowExW(0, L"STATIC", BuildSystemLabel(ui->version, ui->controller->DisplayName()).c_str(), WS_CHILD | WS_VISIBLE,
-            scale(34), scale(68), scale(570), scale(24), window, reinterpret_cast<HMENU>(IDC_SYSTEM), nullptr, nullptr);
-        ui->description = CreateWindowExW(0, L"STATIC", ui->controller->Description().c_str(), WS_CHILD | WS_VISIBLE,
-            scale(34), scale(96), scale(570), scale(46), window, reinterpret_cast<HMENU>(IDC_DESCRIPTION), nullptr, nullptr);
-        ui->status = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-            scale(46), scale(172), scale(550), scale(30), window, reinterpret_cast<HMENU>(IDC_STATUS), nullptr, nullptr);
-        ui->details = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-            scale(46), scale(210), scale(550), scale(74), window, reinterpret_cast<HMENU>(IDC_DETAILS), nullptr, nullptr);
+        const auto width = [](const RECT& rect) { return rect.right - rect.left; };
+        const auto height = [](const RECT& rect) { return rect.bottom - rect.top; };
+        ui->title = CreateWindowExW(0, L"STATIC", kAppName, WS_CHILD | WS_VISIBLE | SS_NOPREFIX,
+            layout.title.left, layout.title.top, width(layout.title), height(layout.title),
+            window, nullptr, nullptr, nullptr);
+        ui->author = CreateWindowExW(0, L"STATIC", L"作者：啊常用户",
+            WS_CHILD | WS_VISIBLE | SS_RIGHT | SS_NOPREFIX,
+            layout.author.left, layout.author.top, width(layout.author), height(layout.author),
+            window, nullptr, nullptr, nullptr);
+        ui->system = CreateWindowExW(0, L"STATIC",
+            BuildSystemLabel(ui->version, ui->controller->DisplayName()).c_str(),
+            WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
+            layout.system.left, layout.system.top, width(layout.system), height(layout.system),
+            window, reinterpret_cast<HMENU>(IDC_SYSTEM), nullptr, nullptr);
+        ui->description = CreateWindowExW(0, L"STATIC", ui->controller->Description().c_str(),
+            WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX,
+            layout.description.left, layout.description.top, width(layout.description), height(layout.description),
+            window, reinterpret_cast<HMENU>(IDC_DESCRIPTION), nullptr, nullptr);
+        ui->status = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
+            layout.updateCard.left, layout.updateCard.top, width(layout.updateCard), height(layout.updateCard),
+            window, reinterpret_cast<HMENU>(IDC_STATUS), nullptr, nullptr);
         ui->disableButton = CreateWindowExW(0, L"BUTTON", ui->controller->DisableButtonText().c_str(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(26), scale(296), scale(282), scale(52),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            layout.disableButton.left, layout.disableButton.top,
+            width(layout.disableButton), height(layout.disableButton),
             window, reinterpret_cast<HMENU>(IDC_DISABLE), nullptr, nullptr);
         ui->restoreButton = CreateWindowExW(0, L"BUTTON", L"恢复到运行本软件前的状态",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(332), scale(296), scale(282), scale(52),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            layout.restoreButton.left, layout.restoreButton.top,
+            width(layout.restoreButton), height(layout.restoreButton),
             window, reinterpret_cast<HMENU>(IDC_RESTORE), nullptr, nullptr);
-        ui->upgradeStatus = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-            scale(46), scale(394), scale(550), scale(30), window, reinterpret_cast<HMENU>(IDC_UPGRADE_STATUS), nullptr, nullptr);
-        ui->upgradeDetails = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-            scale(46), scale(429), scale(550), scale(57), window, reinterpret_cast<HMENU>(IDC_UPGRADE_DETAILS), nullptr, nullptr);
+        ui->upgradeStatus = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
+            layout.upgradeCard.left, layout.upgradeCard.top,
+            width(layout.upgradeCard), height(layout.upgradeCard),
+            window, reinterpret_cast<HMENU>(IDC_UPGRADE_STATUS), nullptr, nullptr);
         ui->upgradeDisableButton = CreateWindowExW(0, L"BUTTON", ui->upgradeBlocker.BlockButtonText().c_str(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(26), scale(493), scale(282), scale(52),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            layout.upgradeDisableButton.left, layout.upgradeDisableButton.top,
+            width(layout.upgradeDisableButton), height(layout.upgradeDisableButton),
             window, reinterpret_cast<HMENU>(IDC_UPGRADE_DISABLE), nullptr, nullptr);
         ui->upgradeRestoreButton = CreateWindowExW(0, L"BUTTON", ui->upgradeBlocker.RestoreButtonText().c_str(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, scale(332), scale(493), scale(282), scale(52),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            layout.upgradeRestoreButton.left, layout.upgradeRestoreButton.top,
+            width(layout.upgradeRestoreButton), height(layout.upgradeRestoreButton),
             window, reinterpret_cast<HMENU>(IDC_UPGRADE_RESTORE), nullptr, nullptr);
-        const std::wstring warningText = ui->controller->Warning() + L"\r\n" + ui->upgradeBlocker.Warning();
-        ui->warning = CreateWindowExW(0, L"STATIC", warningText.c_str(), WS_CHILD | WS_VISIBLE,
-            scale(42), scale(582), scale(555), scale(124), window, reinterpret_cast<HMENU>(IDC_WARNING), nullptr, nullptr);
-        for (HWND control : {title, author, ui->system, ui->description, ui->details,
-             ui->disableButton, ui->restoreButton, ui->upgradeDetails,
-             ui->upgradeDisableButton, ui->upgradeRestoreButton, ui->warning}) SetControlFont(control, ui->normalFont);
-        SetControlFont(title, ui->titleFont);
-        SetControlFont(ui->status, ui->statusFont);
-        SetControlFont(ui->upgradeStatus, ui->statusFont);
+        ui->warning = CreateWindowExW(0, L"STATIC", kUiWarningText,
+            WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
+            layout.warning.left, layout.warning.top, width(layout.warning), height(layout.warning),
+            window, reinterpret_cast<HMENU>(IDC_WARNING), nullptr, nullptr);
+        for (HWND control : {ui->system, ui->description, ui->status,
+             ui->disableButton, ui->restoreButton, ui->upgradeStatus,
+             ui->upgradeDisableButton, ui->upgradeRestoreButton, ui->warning}) {
+            SetControlFont(control, ui->normalFont);
+        }
+        SetControlFont(ui->title, ui->titleFont);
+        SetControlFont(ui->author, ui->authorFont);
         RefreshUi(window, *ui);
         return 0;
     }
@@ -1714,13 +2237,13 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
         FillRect(dc, &client, ui && ui->backgroundBrush ? ui->backgroundBrush :
             reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
         if (ui) {
-            const auto scale = [ui](int value) { return ScaleForDpi(value, ui->dpi); };
-            RECT statusPanel = {scale(26), scale(153), scale(614), scale(360)};
-            RECT upgradePanel = {scale(26), scale(378), scale(614), scale(555)};
-            RECT warningPanel = {scale(26), scale(570), scale(614), scale(718)};
-            FillRoundedPanel(dc, statusPanel, RGB(244, 250, 247), RGB(211, 225, 216), scale(12));
-            FillRoundedPanel(dc, upgradePanel, RGB(244, 248, 252), RGB(208, 220, 234), scale(12));
-            FillRoundedPanel(dc, warningPanel, RGB(255, 249, 235), RGB(238, 218, 169), scale(12));
+            const UiLayout layout = BuildUiLayout(ui->dpi);
+            const VisualPalette updatePalette = PaletteFor(UpdateVisual(*ui));
+            const VisualPalette upgradePalette = PaletteFor(UpgradeVisual(*ui));
+            FillRoundedPanel(dc, layout.updatePanel, updatePalette.panel,
+                updatePalette.border, ScaleForDpi(10, ui->dpi));
+            FillRoundedPanel(dc, layout.upgradePanel, upgradePalette.panel,
+                upgradePalette.border, ScaleForDpi(10, ui->dpi));
         }
         EndPaint(window, &paint);
         return 0;
@@ -1790,10 +2313,29 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
         }
         break;
     case WM_DRAWITEM:
-        if (ui && (wParam == IDC_DISABLE || wParam == IDC_RESTORE ||
-            wParam == IDC_UPGRADE_DISABLE || wParam == IDC_UPGRADE_RESTORE)) {
-            DrawOwnerButton(*reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
-            return TRUE;
+        if (ui) {
+            const DRAWITEMSTRUCT& item = *reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+            if (wParam == IDC_DISABLE || wParam == IDC_RESTORE ||
+                wParam == IDC_UPGRADE_DISABLE || wParam == IDC_UPGRADE_RESTORE) {
+                DrawOwnerButton(item);
+                return TRUE;
+            }
+            if (wParam == IDC_SYSTEM) {
+                DrawSystemInfo(item, *ui);
+                return TRUE;
+            }
+            if (wParam == IDC_STATUS) {
+                DrawUpdateStatusCard(item, *ui);
+                return TRUE;
+            }
+            if (wParam == IDC_UPGRADE_STATUS) {
+                DrawUpgradeStatusCard(item, *ui);
+                return TRUE;
+            }
+            if (wParam == IDC_WARNING) {
+                DrawWarningCard(item, *ui);
+                return TRUE;
+            }
         }
         break;
     case WM_CTLCOLORSTATIC:
@@ -1801,23 +2343,9 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
             HDC dc = reinterpret_cast<HDC>(wParam);
             HWND control = reinterpret_cast<HWND>(lParam);
             SetBkMode(dc, TRANSPARENT);
-            if (control == ui->status || control == ui->details) {
-                SetTextColor(dc, control == ui->status ? ui->statusColor : RGB(48, 61, 73));
-                SetBkColor(dc, RGB(244, 250, 247));
-                return reinterpret_cast<LRESULT>(ui->statusBrush);
-            }
-            if (control == ui->upgradeStatus || control == ui->upgradeDetails) {
-                SetTextColor(dc, control == ui->upgradeStatus ? ui->upgradeStatusColor : RGB(48, 61, 73));
-                SetBkColor(dc, RGB(244, 248, 252));
-                return reinterpret_cast<LRESULT>(ui->upgradeBrush);
-            }
-            if (control == ui->warning) {
-                SetTextColor(dc, RGB(133, 78, 0));
-                SetBkColor(dc, RGB(255, 249, 235));
-                return reinterpret_cast<LRESULT>(ui->warningBrush);
-            }
-            SetTextColor(dc, RGB(32, 43, 55));
-            SetBkColor(dc, RGB(246, 248, 251));
+            SetTextColor(dc, control == ui->author ? RGB(105, 116, 129) :
+                control == ui->description ? RGB(73, 86, 101) : RGB(24, 35, 50));
+            SetBkColor(dc, RGB(247, 249, 252));
             return reinterpret_cast<LRESULT>(ui->backgroundBrush);
         }
         break;
@@ -1825,11 +2353,10 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
         if (ui) {
             if (ui->normalFont) DeleteObject(ui->normalFont);
             if (ui->titleFont) DeleteObject(ui->titleFont);
-            if (ui->statusFont) DeleteObject(ui->statusFont);
+            if (ui->cardTitleFont) DeleteObject(ui->cardTitleFont);
+            if (ui->badgeFont) DeleteObject(ui->badgeFont);
+            if (ui->authorFont) DeleteObject(ui->authorFont);
             if (ui->backgroundBrush) DeleteObject(ui->backgroundBrush);
-            if (ui->statusBrush) DeleteObject(ui->statusBrush);
-            if (ui->upgradeBrush) DeleteObject(ui->upgradeBrush);
-            if (ui->warningBrush) DeleteObject(ui->warningBrush);
         }
         PostQuitMessage(0); return 0;
     }
@@ -1910,7 +2437,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         if (!screenDc) ThrowWin32(L"读取屏幕 DPI");
         const int windowDpi = GetDeviceCaps(screenDc, LOGPIXELSY);
         ReleaseDC(nullptr, screenDc);
-        RECT rect = {0, 0, ScaleForDpi(640, windowDpi), ScaleForDpi(730, windowDpi)};
+        RECT rect = {0, 0, ScaleForDpi(kUiClientWidth, windowDpi),
+            ScaleForDpi(kUiClientHeight, windowDpi)};
         AdjustWindowRectEx(&rect, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, 0);
         HWND window = CreateWindowExW(0, wc.lpszClassName, kAppName,
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,

@@ -128,6 +128,63 @@ int wmain() {
             serverAll.details[0].find(L"更新通知：当前系统不适用") != std::wstring::npos,
             L"Windows Server 2016 不适用的通知策略被错误计入状态。" );
 
+        UiContext presentation;
+        presentation.version = win10_22h2;
+        presentation.updateState = all;
+        Require(UpdateHeaderState(presentation) == L"已完全关闭" &&
+            UpdateVisual(presentation) == StatusVisual::Success,
+            L"完整关闭状态的 UI 映射错误。" );
+        const std::vector<StatusRow> allRows = BuildUpdateRows(presentation.updateState);
+        Require(allRows.size() == 5 && allRows[0].label == L"自动更新" &&
+            allRows[4].label == L"Windows Update 手动检查、下载和安装" &&
+            allRows[4].value == L"已禁用" && allRows[4].visual == StatusVisual::Success,
+            L"更新子状态没有正确映射为五行右侧徽章。" );
+        presentation.updateState = partial;
+        Require(UpdateHeaderState(presentation) == L"部分关闭" &&
+            UpdateVisual(presentation) == StatusVisual::Warning,
+            L"部分关闭状态的 UI 映射错误。" );
+        presentation.updateState = coreFailed;
+        Require(UpdateHeaderState(presentation) == L"未关闭" &&
+            UpdateVisual(presentation) == StatusVisual::Error,
+            L"未关闭状态的 UI 映射错误。" );
+
+        presentation.upgradeState = upgradeBlocked;
+        Require(UpgradeHeaderState(presentation) == L"已阻止" &&
+            UpgradeVisual(presentation) == StatusVisual::Success,
+            L"Windows 11 已阻止状态的 UI 映射错误。" );
+        const std::vector<StatusRow> blockedRows = BuildUpgradeRows(presentation);
+        Require(blockedRows.size() == 3 && blockedRows[2].label == L"锁定版本" &&
+            blockedRows[2].visual == StatusVisual::Success,
+            L"Windows 11 锁定版本的成功徽章映射错误。" );
+        presentation.upgradeState = upgradeAllowed;
+        const std::vector<StatusRow> allowedRows = BuildUpgradeRows(presentation);
+        Require(UpgradeHeaderState(presentation) == L"未阻止" &&
+            UpgradeVisual(presentation) == StatusVisual::Error &&
+            allowedRows.size() == 3 && allowedRows[2].label == L"锁定版本" &&
+            allowedRows[2].value == L"未锁定" && allowedRows[2].visual == StatusVisual::Error,
+            L"Windows 11 未阻止状态的 UI 映射错误。" );
+        presentation.upgradeState = upgradePartial;
+        Require(UpgradeHeaderState(presentation) == L"部分配置" &&
+            UpgradeVisual(presentation) == StatusVisual::Warning,
+            L"Windows 11 部分配置状态的 UI 映射错误。" );
+
+        for (const int layoutDpi : {96, 120, 144}) {
+            const UiLayout layout = BuildUiLayout(layoutDpi);
+            Require(layout.updateCard.bottom <= layout.disableButton.top &&
+                layout.restoreButton.top == layout.disableButton.top &&
+                layout.restoreButton.bottom == layout.disableButton.bottom,
+                L"Windows 更新卡片与按钮在 DPI 缩放后错位。" );
+            Require(layout.upgradeCard.top - layout.disableButton.bottom >= ScaleForDpi(35, layoutDpi) &&
+                layout.upgradeCard.bottom <= layout.upgradeDisableButton.top,
+                L"两个功能区在 DPI 缩放后层级分隔不足。" );
+            Require(layout.upgradeRestoreButton.top == layout.upgradeDisableButton.top &&
+                layout.upgradeRestoreButton.bottom == layout.upgradeDisableButton.bottom &&
+                layout.warning.top - layout.upgradeDisableButton.bottom >= ScaleForDpi(24, layoutDpi),
+                L"Windows 11 按钮或底部说明在 DPI 缩放后错位。" );
+            Require(layout.warning.bottom <= ScaleForDpi(kUiClientHeight, layoutDpi),
+                L"底部说明超出 DPI 缩放后的客户区。" );
+        }
+
         ModernUpdateController modern(L"Windows 10");
         modern.TestSetBackupPath(testDirectory + L"\\policy-backup-v1.txt");
         RemoveIfPresent(modern.TestBackupPath());
@@ -228,21 +285,32 @@ int wmain() {
         windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
         windowClass.lpszClassName = L"AchangUser.UpdateLock.NativeTests";
         if (!RegisterClassExW(&windowClass)) ThrowWin32(L"注册界面测试窗口类");
+        RECT testWindowRect = {0, 0, ScaleForDpi(kUiClientWidth, ui.dpi),
+            ScaleForDpi(kUiClientHeight, ui.dpi)};
+        AdjustWindowRectEx(&testWindowRect, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, 0);
         HWND testWindow = CreateWindowExW(0, windowClass.lpszClassName, kAppName,
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, 0, 0, 640, 730,
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, 0, 0,
+            testWindowRect.right - testWindowRect.left, testWindowRect.bottom - testWindowRect.top,
             nullptr, nullptr, windowClass.hInstance, &ui);
         if (!testWindow) ThrowWin32(L"创建界面布局测试窗口");
-        const RECT updateDetails = ChildClientRect(testWindow, IDC_DETAILS);
+        const RECT updateCard = ChildClientRect(testWindow, IDC_STATUS);
         const RECT updateButton = ChildClientRect(testWindow, IDC_DISABLE);
-        const RECT upgradeStatusRect = ChildClientRect(testWindow, IDC_UPGRADE_STATUS);
-        const RECT upgradeDetailsRect = ChildClientRect(testWindow, IDC_UPGRADE_DETAILS);
+        const RECT upgradeCard = ChildClientRect(testWindow, IDC_UPGRADE_STATUS);
         const RECT upgradeButton = ChildClientRect(testWindow, IDC_UPGRADE_DISABLE);
-        Require(updateDetails.bottom <= updateButton.top && updateButton.top - updateDetails.bottom <= ScaleForDpi(20, ui.dpi),
+        const RECT warningCard = ChildClientRect(testWindow, IDC_WARNING);
+        RECT clientRect = {};
+        GetClientRect(testWindow, &clientRect);
+        Require(updateCard.bottom <= updateButton.top &&
+            updateButton.top - updateCard.bottom <= ScaleForDpi(6, ui.dpi),
             L"自动更新状态与操作按钮距离过大。" );
-        Require(upgradeStatusRect.top - updateButton.bottom >= ScaleForDpi(35, ui.dpi),
+        Require(upgradeCard.top - updateButton.bottom >= ScaleForDpi(35, ui.dpi),
             L"自动更新与 Windows 11 升级区域分隔不足。" );
-        Require(upgradeDetailsRect.bottom <= upgradeButton.top && upgradeButton.top - upgradeDetailsRect.bottom <= ScaleForDpi(12, ui.dpi),
+        Require(upgradeCard.bottom <= upgradeButton.top &&
+            upgradeButton.top - upgradeCard.bottom <= ScaleForDpi(6, ui.dpi),
             L"Windows 11 升级状态与操作按钮距离过大。" );
+        Require(warningCard.top - upgradeButton.bottom >= ScaleForDpi(24, ui.dpi) &&
+            warningCard.bottom <= clientRect.bottom,
+            L"底部说明区域间距或客户区边界错误。" );
         DestroyWindow(testWindow);
         UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
         if (!RemoveDirectoryW(testDirectory.c_str())) ThrowWin32(L"删除测试临时目录");
