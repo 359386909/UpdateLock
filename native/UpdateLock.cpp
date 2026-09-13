@@ -1500,7 +1500,9 @@ struct UiContext {
     HFONT normalFont = nullptr;
     HFONT titleFont = nullptr;
     HFONT cardTitleFont = nullptr;
+    HFONT stateFont = nullptr;
     HFONT badgeFont = nullptr;
+    HFONT buttonFont = nullptr;
     HFONT authorFont = nullptr;
     HBRUSH backgroundBrush = nullptr;
     UpdateStatus updateState{StatusLevel::Enabled, L"", {}};
@@ -1514,8 +1516,8 @@ int ScaleForDpi(int value, int dpi) {
     return MulDiv(value, dpi, 96);
 }
 
-constexpr int kUiClientWidth = 700;
-constexpr int kUiClientHeight = 686;
+constexpr int kUiClientWidth = 780;
+constexpr int kUiClientHeight = 858;
 
 struct UiLayout {
     RECT title;
@@ -1540,19 +1542,19 @@ RECT ScaleRect(int left, int top, int right, int bottom, int dpi) {
 
 UiLayout BuildUiLayout(int dpi) {
     return UiLayout{
-        ScaleRect(28, 14, 520, 50, dpi),
-        ScaleRect(524, 23, 668, 47, dpi),
-        ScaleRect(24, 55, 676, 95, dpi),
-        ScaleRect(28, 101, 672, 136, dpi),
-        ScaleRect(20, 142, 680, 354, dpi),
-        ScaleRect(32, 153, 668, 299, dpi),
-        ScaleRect(32, 304, 342, 344, dpi),
-        ScaleRect(358, 304, 668, 344, dpi),
-        ScaleRect(20, 368, 680, 552, dpi),
-        ScaleRect(32, 379, 668, 497, dpi),
-        ScaleRect(32, 502, 342, 542, dpi),
-        ScaleRect(358, 502, 668, 542, dpi),
-        ScaleRect(20, 566, 680, 676, dpi)};
+        ScaleRect(28, 14, 570, 52, dpi),
+        ScaleRect(590, 23, 752, 47, dpi),
+        ScaleRect(24, 58, 756, 100, dpi),
+        ScaleRect(30, 108, 750, 144, dpi),
+        ScaleRect(20, 154, 760, 432, dpi),
+        ScaleRect(36, 170, 744, 362, dpi),
+        ScaleRect(36, 374, 378, 418, dpi),
+        ScaleRect(402, 374, 744, 418, dpi),
+        ScaleRect(20, 454, 760, 696, dpi),
+        ScaleRect(36, 470, 744, 626, dpi),
+        ScaleRect(36, 638, 378, 682, dpi),
+        ScaleRect(402, 638, 744, 682, dpi),
+        ScaleRect(20, 718, 760, 846, dpi)};
 }
 
 enum class StatusVisual { Neutral, Success, Warning, Error };
@@ -1871,25 +1873,86 @@ int MeasureTextWidth(HDC dc, const std::wstring& text) {
     return size.cx;
 }
 
+enum class CardIdentityIcon { UpdateShield, Windows };
+
+void DrawUpdateShield(HDC dc, int centerX, int centerY, int size,
+    StatusVisual visual) {
+    const COLORREF color = PaletteFor(visual).foreground;
+    const int half = size / 2;
+    POINT shield[6] = {
+        {centerX, centerY - half},
+        {centerX + half, centerY - size / 3},
+        {centerX + size * 2 / 5, centerY + size / 4},
+        {centerX, centerY + half},
+        {centerX - size * 2 / 5, centerY + size / 4},
+        {centerX - half, centerY - size / 3}};
+    HPEN pen = CreatePen(PS_SOLID, 1, color);
+    HBRUSH brush = CreateSolidBrush(color);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    HGDIOBJ oldBrush = SelectObject(dc, brush);
+    Polygon(dc, shield, static_cast<int>(std::size(shield)));
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(brush);
+    DeleteObject(pen);
+
+    HPEN checkPen = CreatePen(PS_SOLID, std::max(2, size / 11), RGB(255, 255, 255));
+    oldPen = SelectObject(dc, checkPen);
+    MoveToEx(dc, centerX - size / 4, centerY, nullptr);
+    LineTo(dc, centerX - size / 16, centerY + size / 5);
+    LineTo(dc, centerX + size / 3, centerY - size / 4);
+    SelectObject(dc, oldPen);
+    DeleteObject(checkPen);
+}
+
+void DrawWindowsMark(HDC dc, int centerX, int centerY, int size) {
+    const int half = size / 2;
+    const int gap = std::max(2, size / 12);
+    const int tile = (size - gap) / 2;
+    HBRUSH brush = CreateSolidBrush(RGB(0, 120, 215));
+    const RECT tiles[4] = {
+        {centerX - half, centerY - half, centerX - half + tile, centerY - half + tile},
+        {centerX - half + tile + gap, centerY - half, centerX + half, centerY - half + tile},
+        {centerX - half, centerY - half + tile + gap, centerX - half + tile, centerY + half},
+        {centerX - half + tile + gap, centerY - half + tile + gap, centerX + half, centerY + half}};
+    for (const RECT& tileRect : tiles) FillRect(dc, &tileRect, brush);
+    DeleteObject(brush);
+}
+
 void DrawCardHeader(HDC dc, const UiContext& ui, const RECT& bounds,
-    const std::wstring& prefix, const std::wstring& state, StatusVisual visual) {
-    const int pad = ScaleForDpi(12, ui.dpi);
-    const int iconSize = ScaleForDpi(20, ui.dpi);
+    const std::wstring& prefix, const std::wstring& state, StatusVisual visual,
+    CardIdentityIcon identity) {
+    const int pad = ScaleForDpi(10, ui.dpi);
+    const int identitySize = ScaleForDpi(identity == CardIdentityIcon::UpdateShield ? 36 : 34, ui.dpi);
+    const int statusIconSize = ScaleForDpi(22, ui.dpi);
+    const int centerY = (bounds.top + bounds.bottom) / 2;
+    const int identityX = bounds.left + pad + identitySize / 2;
+    if (identity == CardIdentityIcon::UpdateShield) {
+        DrawUpdateShield(dc, identityX, centerY, identitySize, StatusVisual::Success);
+    } else {
+        DrawWindowsMark(dc, identityX, centerY, identitySize);
+    }
+
     HGDIOBJ oldFont = SelectObject(dc, ui.cardTitleFont);
     SetBkMode(dc, TRANSPARENT);
     TEXTMETRICW metrics = {};
     GetTextMetricsW(dc, &metrics);
-    const int y = bounds.top + (bounds.bottom - bounds.top - metrics.tmHeight) / 2;
-    int x = bounds.left + pad;
+    const int labelY = bounds.top + (bounds.bottom - bounds.top - metrics.tmHeight) / 2;
+    int x = identityX + identitySize / 2 + ScaleForDpi(14, ui.dpi);
     SetTextColor(dc, RGB(24, 35, 50));
-    TextOutW(dc, x, y, prefix.c_str(), static_cast<int>(prefix.size()));
+    TextOutW(dc, x, labelY, prefix.c_str(), static_cast<int>(prefix.size()));
     x += MeasureTextWidth(dc, prefix);
+
+    SelectObject(dc, ui.stateFont);
+    GetTextMetricsW(dc, &metrics);
+    const int stateY = bounds.top + (bounds.bottom - bounds.top - metrics.tmHeight) / 2;
     const VisualPalette palette = PaletteFor(visual);
     SetTextColor(dc, palette.foreground);
-    TextOutW(dc, x, y, state.c_str(), static_cast<int>(state.size()));
-    x += MeasureTextWidth(dc, state) + ScaleForDpi(10, ui.dpi) + iconSize / 2;
-    x = std::min(x, static_cast<int>(bounds.right) - pad - iconSize / 2);
-    DrawStatusIcon(dc, x, (bounds.top + bounds.bottom) / 2, iconSize, visual);
+    x += ScaleForDpi(7, ui.dpi);
+    TextOutW(dc, x, stateY, state.c_str(), static_cast<int>(state.size()));
+    x += MeasureTextWidth(dc, state) + ScaleForDpi(11, ui.dpi) + statusIconSize / 2;
+    x = std::min(x, static_cast<int>(bounds.right) - pad - statusIconSize / 2);
+    DrawStatusIcon(dc, x, centerY, statusIconSize, visual);
     SelectObject(dc, oldFont);
 }
 
@@ -1902,8 +1965,8 @@ void DrawStatusBadge(HDC dc, const UiContext& ui, const RECT& bounds,
     HGDIOBJ oldFont = SelectObject(dc, ui.badgeFont);
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, palette.foreground);
-    const int iconSize = std::max(12, badgeHeight - ScaleForDpi(8, ui.dpi));
-    const int iconX = bounds.right - ScaleForDpi(13, ui.dpi) - iconSize / 2;
+    const int iconSize = std::max(16, badgeHeight - ScaleForDpi(6, ui.dpi));
+    const int iconX = bounds.right - ScaleForDpi(10, ui.dpi) - iconSize / 2;
     RECT textRect = {bounds.left + ScaleForDpi(10, ui.dpi), bounds.top,
         iconX - iconSize / 2 - ScaleForDpi(5, ui.dpi), bounds.bottom};
     DrawTextW(dc, text.c_str(), -1, &textRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -1935,9 +1998,9 @@ void DrawSystemInfo(const DRAWITEMSTRUCT& item, const UiContext& ui) {
     const int top = ScaleForDpi(2, ui.dpi);
     const int bottom = client.bottom - ScaleForDpi(2, ui.dpi);
     const int gap = ScaleForDpi(10, ui.dpi);
-    const int firstWidth = ScaleForDpi(226, ui.dpi);
-    const int secondWidth = ScaleForDpi(194, ui.dpi);
-    const int thirdWidth = ScaleForDpi(172, ui.dpi);
+    const int firstWidth = ScaleForDpi(246, ui.dpi);
+    const int secondWidth = ScaleForDpi(220, ui.dpi);
+    const int thirdWidth = ScaleForDpi(206, ui.dpi);
     RECT first = {0, top, firstWidth, bottom};
     RECT second = {first.right + gap, top, first.right + gap + secondWidth, bottom};
     RECT third = {second.right + gap, top, second.right + gap + thirdWidth, bottom};
@@ -1951,8 +2014,9 @@ void DrawUpdateStatusCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
     const VisualPalette palette = PaletteFor(visual);
     FillRectColor(item.hDC, item.rcItem, palette.panel);
     RECT header = item.rcItem;
-    header.bottom = header.top + ScaleForDpi(36, ui.dpi);
-    DrawCardHeader(item.hDC, ui, header, L"Windows 更新状态：", UpdateHeaderState(ui), visual);
+    header.bottom = header.top + ScaleForDpi(52, ui.dpi);
+    DrawCardHeader(item.hDC, ui, header, L"Windows 更新状态：",
+        UpdateHeaderState(ui), visual, CardIdentityIcon::UpdateShield);
 
     std::vector<StatusRow> rows = BuildUpdateRows(ui.updateState);
     if (rows.empty()) {
@@ -1962,7 +2026,7 @@ void DrawUpdateStatusCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
     if (rows.size() > 5) rows.resize(5);
     RECT body = {item.rcItem.left + ScaleForDpi(6, ui.dpi), header.bottom + ScaleForDpi(2, ui.dpi),
         item.rcItem.right - ScaleForDpi(6, ui.dpi), item.rcItem.bottom};
-    FillRoundedPanel(item.hDC, body, RGB(255, 255, 255), RGB(226, 232, 238), ScaleForDpi(7, ui.dpi));
+    FillRoundedPanel(item.hDC, body, RGB(255, 255, 255), RGB(228, 234, 240), ScaleForDpi(8, ui.dpi));
     const int rowHeight = (body.bottom - body.top) / static_cast<int>(rows.size());
     HGDIOBJ oldFont = SelectObject(item.hDC, ui.normalFont);
     SetBkMode(item.hDC, TRANSPARENT);
@@ -1970,22 +2034,14 @@ void DrawUpdateStatusCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
         const int top = body.top + static_cast<int>(i) * rowHeight;
         const int bottom = i + 1 == rows.size() ? body.bottom : top + rowHeight;
         RECT labelRect = {body.left + ScaleForDpi(14, ui.dpi), top,
-            body.right - ScaleForDpi(184, ui.dpi), bottom};
+            body.right - ScaleForDpi(174, ui.dpi), bottom};
         SetTextColor(item.hDC, RGB(35, 49, 66));
         DrawTextW(item.hDC, rows[i].label.c_str(), -1, &labelRect,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         if (rows[i].badge) {
-            RECT badge = {body.right - ScaleForDpi(174, ui.dpi), top + ScaleForDpi(2, ui.dpi),
-                body.right - ScaleForDpi(10, ui.dpi), bottom - ScaleForDpi(2, ui.dpi)};
+            RECT badge = {body.right - ScaleForDpi(156, ui.dpi), top + ScaleForDpi(1, ui.dpi),
+                body.right - ScaleForDpi(18, ui.dpi), bottom - ScaleForDpi(1, ui.dpi)};
             DrawStatusBadge(item.hDC, ui, badge, rows[i].value, rows[i].visual);
-        }
-        if (i + 1 < rows.size()) {
-            HPEN divider = CreatePen(PS_SOLID, 1, RGB(233, 237, 242));
-            HGDIOBJ oldPen = SelectObject(item.hDC, divider);
-            MoveToEx(item.hDC, body.left + ScaleForDpi(14, ui.dpi), bottom, nullptr);
-            LineTo(item.hDC, body.right - ScaleForDpi(14, ui.dpi), bottom);
-            SelectObject(item.hDC, oldPen);
-            DeleteObject(divider);
         }
     }
     SelectObject(item.hDC, oldFont);
@@ -1996,15 +2052,16 @@ void DrawUpgradeStatusCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
     const VisualPalette palette = PaletteFor(visual);
     FillRectColor(item.hDC, item.rcItem, palette.panel);
     RECT header = item.rcItem;
-    header.bottom = header.top + ScaleForDpi(35, ui.dpi);
-    DrawCardHeader(item.hDC, ui, header, L"Windows 11 升级状态：", UpgradeHeaderState(ui), visual);
+    header.bottom = header.top + ScaleForDpi(52, ui.dpi);
+    DrawCardHeader(item.hDC, ui, header, L"Windows 11 升级状态：",
+        UpgradeHeaderState(ui), visual, CardIdentityIcon::Windows);
 
     std::vector<StatusRow> rows = BuildUpgradeRows(ui);
     if (rows.empty()) rows.push_back(StatusRow{L"暂无状态详情", L"", StatusVisual::Neutral, false});
     if (rows.size() > 4) rows.resize(4);
-    RECT body = {item.rcItem.left + ScaleForDpi(6, ui.dpi), header.bottom + ScaleForDpi(1, ui.dpi),
+    RECT body = {item.rcItem.left + ScaleForDpi(6, ui.dpi), header.bottom + ScaleForDpi(2, ui.dpi),
         item.rcItem.right - ScaleForDpi(6, ui.dpi), item.rcItem.bottom};
-    FillRoundedPanel(item.hDC, body, RGB(255, 255, 255), RGB(226, 232, 238), ScaleForDpi(7, ui.dpi));
+    FillRoundedPanel(item.hDC, body, RGB(255, 255, 255), RGB(228, 234, 240), ScaleForDpi(8, ui.dpi));
     const int rowHeight = (body.bottom - body.top) / static_cast<int>(rows.size());
     HGDIOBJ oldFont = SelectObject(item.hDC, ui.normalFont);
     SetBkMode(item.hDC, TRANSPARENT);
@@ -2029,10 +2086,10 @@ void DrawUpgradeStatusCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
                 int badgeWidth = MeasureTextWidth(item.hDC, rows[i].value) + ScaleForDpi(54, ui.dpi);
                 SelectObject(item.hDC, badgeMeasureFont);
                 badgeWidth = std::max(ScaleForDpi(112, ui.dpi),
-                    std::min(ScaleForDpi(255, ui.dpi), badgeWidth));
-                RECT badge = {body.right - ScaleForDpi(10, ui.dpi) - badgeWidth,
-                    top + ScaleForDpi(2, ui.dpi), body.right - ScaleForDpi(10, ui.dpi),
-                    bottom - ScaleForDpi(2, ui.dpi)};
+                    std::min(ScaleForDpi(210, ui.dpi), badgeWidth));
+                RECT badge = {body.right - ScaleForDpi(18, ui.dpi) - badgeWidth,
+                    top + ScaleForDpi(1, ui.dpi), body.right - ScaleForDpi(18, ui.dpi),
+                    bottom - ScaleForDpi(1, ui.dpi)};
                 DrawStatusBadge(item.hDC, ui, badge, rows[i].value, rows[i].visual);
             } else {
                 RECT valueRect = {body.left + ScaleForDpi(146, ui.dpi), top,
@@ -2041,14 +2098,6 @@ void DrawUpgradeStatusCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
                 DrawTextW(item.hDC, rows[i].value.c_str(), -1, &valueRect,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             }
-        }
-        if (i + 1 < rows.size()) {
-            HPEN divider = CreatePen(PS_SOLID, 1, RGB(233, 237, 242));
-            HGDIOBJ oldPen = SelectObject(item.hDC, divider);
-            MoveToEx(item.hDC, body.left + ScaleForDpi(14, ui.dpi), bottom, nullptr);
-            LineTo(item.hDC, body.right - ScaleForDpi(14, ui.dpi), bottom);
-            SelectObject(item.hDC, oldPen);
-            DeleteObject(divider);
         }
     }
     SelectObject(item.hDC, oldFont);
@@ -2082,9 +2131,9 @@ void DrawWarningCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
         L"3. 禁止升级到 Windows 11 仅对 Windows 10 生效。",
         L"4. 本工具不修改 TPM、Secure Boot 或硬件兼容性检查。"}};
     for (size_t i = 0; i < lines.size(); ++i) {
-        const int top = item.rcItem.top + ScaleForDpi(31 + static_cast<int>(i) * 18, ui.dpi);
+        const int top = item.rcItem.top + ScaleForDpi(31 + static_cast<int>(i) * 20, ui.dpi);
         RECT lineRect = {left + ScaleForDpi(27, ui.dpi), top,
-            item.rcItem.right - ScaleForDpi(14, ui.dpi), top + ScaleForDpi(18, ui.dpi)};
+            item.rcItem.right - ScaleForDpi(14, ui.dpi), top + ScaleForDpi(20, ui.dpi)};
         DrawTextW(item.hDC, lines[i], -1, &lineRect,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
@@ -2152,7 +2201,7 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
         ui->backgroundBrush = CreateSolidBrush(RGB(247, 249, 252));
         if (!ui->backgroundBrush) ThrowWin32(L"创建界面画刷");
         const UiLayout layout = BuildUiLayout(dpi);
-        ui->normalFont = CreateFontW(-MulDiv(9, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        ui->normalFont = CreateFontW(-MulDiv(10, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
         ui->titleFont = CreateFontW(-MulDiv(17, dpi, 72), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
@@ -2161,14 +2210,20 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
         ui->cardTitleFont = CreateFontW(-MulDiv(13, dpi, 72), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-        ui->badgeFont = CreateFontW(-MulDiv(9, dpi, 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        ui->stateFont = CreateFontW(-MulDiv(18, dpi, 72), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-        ui->authorFont = CreateFontW(-MulDiv(8, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        ui->badgeFont = CreateFontW(-MulDiv(10, dpi, 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-        if (!ui->normalFont || !ui->titleFont || !ui->cardTitleFont ||
-            !ui->badgeFont || !ui->authorFont) ThrowWin32(L"创建界面字体");
+        ui->buttonFont = CreateFontW(-MulDiv(11, dpi, 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+        ui->authorFont = CreateFontW(-MulDiv(9, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+        if (!ui->normalFont || !ui->titleFont || !ui->cardTitleFont || !ui->stateFont ||
+            !ui->badgeFont || !ui->buttonFont || !ui->authorFont) ThrowWin32(L"创建界面字体");
 
         const auto width = [](const RECT& rect) { return rect.right - rect.left; };
         const auto height = [](const RECT& rect) { return rect.bottom - rect.top; };
@@ -2226,6 +2281,10 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
         }
         SetControlFont(ui->title, ui->titleFont);
         SetControlFont(ui->author, ui->authorFont);
+        for (HWND button : {ui->disableButton, ui->restoreButton,
+             ui->upgradeDisableButton, ui->upgradeRestoreButton}) {
+            SetControlFont(button, ui->buttonFont);
+        }
         RefreshUi(window, *ui);
         return 0;
     }
@@ -2354,7 +2413,9 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
             if (ui->normalFont) DeleteObject(ui->normalFont);
             if (ui->titleFont) DeleteObject(ui->titleFont);
             if (ui->cardTitleFont) DeleteObject(ui->cardTitleFont);
+            if (ui->stateFont) DeleteObject(ui->stateFont);
             if (ui->badgeFont) DeleteObject(ui->badgeFont);
+            if (ui->buttonFont) DeleteObject(ui->buttonFont);
             if (ui->authorFont) DeleteObject(ui->authorFont);
             if (ui->backgroundBrush) DeleteObject(ui->backgroundBrush);
         }

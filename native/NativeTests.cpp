@@ -174,6 +174,12 @@ int wmain() {
                 layout.restoreButton.top == layout.disableButton.top &&
                 layout.restoreButton.bottom == layout.disableButton.bottom,
                 L"Windows 更新卡片与按钮在 DPI 缩放后错位。" );
+            Require(layout.updatePanel.bottom - layout.updatePanel.top >= ScaleForDpi(265, layoutDpi) &&
+                layout.upgradePanel.bottom - layout.upgradePanel.top >= ScaleForDpi(230, layoutDpi),
+                L"状态卡片没有保留加高后的纵向空间。" );
+            Require(layout.disableButton.bottom - layout.disableButton.top == ScaleForDpi(44, layoutDpi) &&
+                layout.upgradeDisableButton.bottom - layout.upgradeDisableButton.top == ScaleForDpi(44, layoutDpi),
+                L"操作按钮没有保持 44px DPI 缩放高度。" );
             Require(layout.upgradeCard.top - layout.disableButton.bottom >= ScaleForDpi(35, layoutDpi) &&
                 layout.upgradeCard.bottom <= layout.upgradeDisableButton.top,
                 L"两个功能区在 DPI 缩放后层级分隔不足。" );
@@ -301,12 +307,12 @@ int wmain() {
         RECT clientRect = {};
         GetClientRect(testWindow, &clientRect);
         Require(updateCard.bottom <= updateButton.top &&
-            updateButton.top - updateCard.bottom <= ScaleForDpi(6, ui.dpi),
+            updateButton.top - updateCard.bottom <= ScaleForDpi(14, ui.dpi),
             L"自动更新状态与操作按钮距离过大。" );
         Require(upgradeCard.top - updateButton.bottom >= ScaleForDpi(35, ui.dpi),
             L"自动更新与 Windows 11 升级区域分隔不足。" );
         Require(upgradeCard.bottom <= upgradeButton.top &&
-            upgradeButton.top - upgradeCard.bottom <= ScaleForDpi(6, ui.dpi),
+            upgradeButton.top - upgradeCard.bottom <= ScaleForDpi(14, ui.dpi),
             L"Windows 11 升级状态与操作按钮距离过大。" );
         Require(warningCard.top - upgradeButton.bottom >= ScaleForDpi(24, ui.dpi) &&
             warningCard.bottom <= clientRect.bottom,
@@ -318,7 +324,7 @@ int wmain() {
         std::wcout << L"ALL_NATIVE_TESTS_PASSED" << std::endl;
         return 0;
     } catch (const AppError& error) {
-        std::wcerr << L"TEST_FAILED: " << error.message << std::endl;
+        std::cerr << "TEST_FAILED: " << WideToUtf8(error.message) << std::endl;
         return 1;
     }
 }
