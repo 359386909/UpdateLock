@@ -1878,16 +1878,20 @@ void DrawButtonActionIcon(HDC dc, int centerX, int centerY, int size,
     pen.SetEndCap(Gdiplus::LineCapRound);
     pen.SetLineJoin(Gdiplus::LineJoinRound);
     if (restore) {
-        const Gdiplus::REAL inset = iconSize * 0.10f;
-        const Gdiplus::RectF arcBounds(cx - iconSize / 2.0f + inset,
-            cy - iconSize / 2.0f + inset, iconSize - inset * 2.0f,
-            iconSize - inset * 2.0f);
-        graphics.DrawArc(&pen, arcBounds, 205.0f, 260.0f);
-        const Gdiplus::PointF tip(cx - iconSize * 0.43f, cy - iconSize * 0.18f);
-        graphics.DrawLine(&pen, tip,
-            Gdiplus::PointF(cx - iconSize * 0.10f, cy - iconSize * 0.22f));
-        graphics.DrawLine(&pen, tip,
-            Gdiplus::PointF(cx - iconSize * 0.34f, cy + iconSize * 0.12f));
+        const Gdiplus::PointF tip(cx - iconSize * 0.40f, cy - iconSize * 0.16f);
+        Gdiplus::GraphicsPath curve;
+        curve.AddBezier(cx - iconSize * 0.08f, cy + iconSize * 0.36f,
+            cx + iconSize * 0.56f, cy + iconSize * 0.40f,
+            cx + iconSize * 0.56f, cy - iconSize * 0.16f,
+            cx + iconSize * 0.08f, cy - iconSize * 0.16f);
+        curve.AddLine(Gdiplus::PointF(cx + iconSize * 0.08f,
+            cy - iconSize * 0.16f), tip);
+        graphics.DrawPath(&pen, &curve);
+        const Gdiplus::PointF arrow[3] = {
+            Gdiplus::PointF(cx - iconSize * 0.17f, cy - iconSize * 0.39f),
+            tip,
+            Gdiplus::PointF(cx - iconSize * 0.17f, cy + iconSize * 0.07f)};
+        graphics.DrawLines(&pen, arrow, static_cast<INT>(std::size(arrow)));
     } else {
         const Gdiplus::REAL inset = stroke / 2.0f + 0.5f;
         graphics.DrawEllipse(&pen, cx - iconSize / 2.0f + inset,
@@ -1896,6 +1900,30 @@ void DrawButtonActionIcon(HDC dc, int centerX, int centerY, int size,
         graphics.DrawLine(&pen, cx - iconSize * 0.29f, cy + iconSize * 0.29f,
             cx + iconSize * 0.29f, cy - iconSize * 0.29f);
     }
+}
+
+void FillRestoreButton(HDC dc, const RECT& rect, COLORREF fill, COLORREF border) {
+    Gdiplus::Graphics graphics(dc);
+    ConfigureIconGraphics(graphics);
+    const Gdiplus::REAL height = static_cast<Gdiplus::REAL>(rect.bottom - rect.top);
+    const Gdiplus::REAL stroke = std::max(1.0f, height / 44.0f);
+    const Gdiplus::REAL inset = stroke / 2.0f;
+    const Gdiplus::REAL x = static_cast<Gdiplus::REAL>(rect.left) + inset;
+    const Gdiplus::REAL y = static_cast<Gdiplus::REAL>(rect.top) + inset;
+    const Gdiplus::REAL width = static_cast<Gdiplus::REAL>(rect.right - rect.left) - stroke - 1.0f;
+    const Gdiplus::REAL pathHeight = height - stroke - 1.0f;
+    const Gdiplus::REAL diameter = std::max(6.0f, height / 5.0f);
+    Gdiplus::GraphicsPath path;
+    path.AddArc(x, y, diameter, diameter, 180.0f, 90.0f);
+    path.AddArc(x + width - diameter, y, diameter, diameter, 270.0f, 90.0f);
+    path.AddArc(x + width - diameter, y + pathHeight - diameter,
+        diameter, diameter, 0.0f, 90.0f);
+    path.AddArc(x, y + pathHeight - diameter, diameter, diameter, 90.0f, 90.0f);
+    path.CloseFigure();
+    Gdiplus::SolidBrush brush(GdiplusColor(fill));
+    Gdiplus::Pen pen(GdiplusColor(border), stroke);
+    graphics.FillPath(&brush, &path);
+    graphics.DrawPath(&pen, &path);
 }
 
 void DrawOwnerButton(const DRAWITEMSTRUCT& item) {
@@ -1918,7 +1946,11 @@ void DrawOwnerButton(const DRAWITEMSTRUCT& item) {
     }
     RECT rect = item.rcItem;
     const int buttonHeight = static_cast<int>(rect.bottom - rect.top);
-    FillRoundedPanel(item.hDC, rect, fill, border, std::max(6, buttonHeight / 5));
+    if (restore) {
+        FillRestoreButton(item.hDC, rect, fill, border);
+    } else {
+        FillRoundedPanel(item.hDC, rect, fill, border, std::max(6, buttonHeight / 5));
+    }
     SetBkMode(item.hDC, TRANSPARENT);
     SetTextColor(item.hDC, foreground);
     HGDIOBJ oldFont = SelectObject(item.hDC,
