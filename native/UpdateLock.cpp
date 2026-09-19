@@ -34,7 +34,7 @@ using std::min;
 
 namespace {
 
-const wchar_t* const kAppName = L"Win7/10/11自动更新关闭3.0.1工具";
+const wchar_t* const kAppName = L"Win7/10/11自动更新关闭工具v3.1";
 const wchar_t* const kMutexName = L"Global\\UpdateLock.SingleInstance.7A64EA9A";
 const wchar_t* const kWindowsUpdate = L"SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate";
 const wchar_t* const kAutomaticUpdates = L"SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU";
