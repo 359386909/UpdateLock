@@ -1902,7 +1902,7 @@ void DrawButtonActionIcon(HDC dc, int centerX, int centerY, int size,
     }
 }
 
-void FillRestoreButton(HDC dc, const RECT& rect, COLORREF fill, COLORREF border) {
+void FillAntialiasedButton(HDC dc, const RECT& rect, COLORREF fill, COLORREF border) {
     Gdiplus::Graphics graphics(dc);
     ConfigureIconGraphics(graphics);
     const Gdiplus::REAL height = static_cast<Gdiplus::REAL>(rect.bottom - rect.top);
@@ -1946,11 +1946,7 @@ void DrawOwnerButton(const DRAWITEMSTRUCT& item) {
     }
     RECT rect = item.rcItem;
     const int buttonHeight = static_cast<int>(rect.bottom - rect.top);
-    if (restore) {
-        FillRestoreButton(item.hDC, rect, fill, border);
-    } else {
-        FillRoundedPanel(item.hDC, rect, fill, border, std::max(6, buttonHeight / 5));
-    }
+    FillAntialiasedButton(item.hDC, rect, fill, border);
     SetBkMode(item.hDC, TRANSPARENT);
     SetTextColor(item.hDC, foreground);
     HGDIOBJ oldFont = SelectObject(item.hDC,
