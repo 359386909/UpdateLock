@@ -2118,13 +2118,13 @@ void DrawUpdateStatusCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
     RECT body = {item.rcItem.left + ScaleForDpi(6, ui.dpi), header.bottom + ScaleForDpi(2, ui.dpi),
         item.rcItem.right - ScaleForDpi(6, ui.dpi), item.rcItem.bottom};
     FillRoundedPanel(item.hDC, body, RGB(255, 255, 255), RGB(228, 234, 240), ScaleForDpi(8, ui.dpi));
-    const int rowHeight = ScaleForDpi(26, ui.dpi);
-    const int badgeWidth = ScaleForDpi(118, ui.dpi);
-    const int badgeHeight = ScaleForDpi(24, ui.dpi);
+    const int rowHeight = ScaleForDpi(27, ui.dpi);
+    const int badgeWidth = ScaleForDpi(124, ui.dpi);
+    const int badgeHeight = ScaleForDpi(26, ui.dpi);
     const int rowsHeight = rowHeight * static_cast<int>(rows.size());
     const int rowsTop = body.top + std::max(0,
         (static_cast<int>(body.bottom - body.top) - rowsHeight) / 2);
-    const int badgeRight = body.right - ScaleForDpi(18, ui.dpi);
+    const int badgeRight = body.right - ScaleForDpi(30, ui.dpi);
     HGDIOBJ oldFont = SelectObject(item.hDC, ui.normalFont);
     SetBkMode(item.hDC, TRANSPARENT);
     for (size_t i = 0; i < rows.size(); ++i) {
@@ -2160,12 +2160,22 @@ void DrawUpgradeStatusCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
     RECT body = {item.rcItem.left + ScaleForDpi(6, ui.dpi), header.bottom + ScaleForDpi(2, ui.dpi),
         item.rcItem.right - ScaleForDpi(6, ui.dpi), item.rcItem.bottom};
     FillRoundedPanel(item.hDC, body, RGB(255, 255, 255), RGB(228, 234, 240), ScaleForDpi(8, ui.dpi));
-    const int rowHeight = ScaleForDpi(24, ui.dpi);
+    const int rowHeight = std::min(ScaleForDpi(28, ui.dpi),
+        (static_cast<int>(body.bottom - body.top) - ScaleForDpi(6, ui.dpi)) /
+        static_cast<int>(rows.size()));
     const int badgeHeight = ScaleForDpi(24, ui.dpi);
     const int rowsHeight = rowHeight * static_cast<int>(rows.size());
     const int rowsTop = body.top + std::max(0,
         (static_cast<int>(body.bottom - body.top) - rowsHeight) / 2);
-    const int badgeRight = body.right - ScaleForDpi(18, ui.dpi);
+    const int badgeRight = body.right - ScaleForDpi(30, ui.dpi);
+    HGDIOBJ measureFont = SelectObject(item.hDC, ui.badgeFont);
+    int badgeWidth = ScaleForDpi(124, ui.dpi);
+    for (const StatusRow& row : rows) {
+        if (row.badge) badgeWidth = std::max(badgeWidth,
+            MeasureTextWidth(item.hDC, row.value) + ScaleForDpi(46, ui.dpi));
+    }
+    SelectObject(item.hDC, measureFont);
+    const int valueLeft = badgeRight - badgeWidth + ScaleForDpi(10, ui.dpi);
     HGDIOBJ oldFont = SelectObject(item.hDC, ui.normalFont);
     SetBkMode(item.hDC, TRANSPARENT);
     for (size_t i = 0; i < rows.size(); ++i) {
@@ -2185,17 +2195,12 @@ void DrawUpgradeStatusCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
             DrawTextW(item.hDC, rows[i].label.c_str(), -1, &labelRect,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             if (rows[i].badge) {
-                HGDIOBJ badgeMeasureFont = SelectObject(item.hDC, ui.badgeFont);
-                int badgeWidth = MeasureTextWidth(item.hDC, rows[i].value) + ScaleForDpi(46, ui.dpi);
-                SelectObject(item.hDC, badgeMeasureFont);
-                badgeWidth = std::max(ScaleForDpi(118, ui.dpi),
-                    std::min(ScaleForDpi(145, ui.dpi), badgeWidth));
                 const int badgeTop = top + (rowHeight - badgeHeight) / 2;
                 RECT badge = {badgeRight - badgeWidth, badgeTop,
                     badgeRight, badgeTop + badgeHeight};
                 DrawStatusBadge(item.hDC, ui, badge, rows[i].value, rows[i].visual);
             } else {
-                RECT valueRect = {body.left + ScaleForDpi(146, ui.dpi), top,
+                RECT valueRect = {valueLeft, top,
                     body.right - ScaleForDpi(12, ui.dpi), bottom};
                 SetTextColor(item.hDC, RGB(31, 45, 62));
                 DrawTextW(item.hDC, rows[i].value.c_str(), -1, &valueRect,
@@ -2217,7 +2222,7 @@ void DrawWarningCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
     FillRoundedPanel(item.hDC, item.rcItem, RGB(255, 249, 235), RGB(235, 196, 102),
         ScaleForDpi(9, ui.dpi));
     const int left = item.rcItem.left + ScaleForDpi(18, ui.dpi);
-    const int titleTop = item.rcItem.top + ScaleForDpi(9, ui.dpi);
+    const int titleTop = item.rcItem.top + ScaleForDpi(10, ui.dpi);
     DrawStatusIcon(item.hDC, left + ScaleForDpi(9, ui.dpi), titleTop + ScaleForDpi(10, ui.dpi),
         ScaleForDpi(18, ui.dpi), StatusVisual::Warning);
     HGDIOBJ oldFont = SelectObject(item.hDC, ui.badgeFont);
@@ -2234,9 +2239,9 @@ void DrawWarningCard(const DRAWITEMSTRUCT& item, const UiContext& ui) {
         L"3. 禁止升级到 Windows 11 仅对 Windows 10 生效。",
         L"4. 本工具不修改 TPM、Secure Boot 或硬件兼容性检查。"}};
     for (size_t i = 0; i < lines.size(); ++i) {
-        const int top = item.rcItem.top + ScaleForDpi(31 + static_cast<int>(i) * 20, ui.dpi);
+        const int top = item.rcItem.top + ScaleForDpi(33 + static_cast<int>(i) * 22, ui.dpi);
         RECT lineRect = {left + ScaleForDpi(27, ui.dpi), top,
-            item.rcItem.right - ScaleForDpi(14, ui.dpi), top + ScaleForDpi(20, ui.dpi)};
+            item.rcItem.right - ScaleForDpi(14, ui.dpi), top + ScaleForDpi(22, ui.dpi)};
         DrawTextW(item.hDC, lines[i], -1, &lineRect,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
