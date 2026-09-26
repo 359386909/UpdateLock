@@ -34,7 +34,7 @@ using std::min;
 
 namespace {
 
-const wchar_t* const kAppName = L"Win7/10/11自动更新关闭工具v3.1";
+const wchar_t* const kAppName = L"Win7/10/11自动更新关闭工具v3.2";
 const wchar_t* const kMutexName = L"Global\\UpdateLock.SingleInstance.7A64EA9A";
 const wchar_t* const kWindowsUpdate = L"SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate";
 const wchar_t* const kAutomaticUpdates = L"SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU";
@@ -1513,12 +1513,20 @@ struct UiContext {
     HFONT badgeFont = nullptr;
     HFONT buttonFont = nullptr;
     HFONT authorFont = nullptr;
+    std::vector<HFONT> retiredFonts;
     HBRUSH backgroundBrush = nullptr;
     UpdateStatus updateState{StatusLevel::Enabled, L"", {}};
     UpdateStatus upgradeState{StatusLevel::Enabled, L"", {}};
     bool updateReadFailed = false;
     bool upgradeReadFailed = false;
     int dpi = 96;
+    int baseDpi = 96;
+    int fontDpi = 96;
+    int contentOriginX = 0;
+    int scrollOffset = 0;
+    bool scrollBarVisible = false;
+    bool layingOut = false;
+    bool inSizeMove = false;
 };
 
 class GdiplusSession {
@@ -1547,6 +1555,10 @@ int ScaleForDpi(int value, int dpi) {
 
 constexpr int kUiClientWidth = 780;
 constexpr int kUiClientHeight = 858;
+constexpr int kUiMinimumClientWidth = kUiClientWidth;
+constexpr int kUiMinimumClientHeight = 420;
+constexpr int kUiMinimumRenderDpi = 72;
+constexpr int kUiMaximumScalePercent = 125;
 
 struct UiLayout {
     RECT title;
@@ -1569,6 +1581,30 @@ RECT ScaleRect(int left, int top, int right, int bottom, int dpi) {
         ScaleForDpi(right, dpi), ScaleForDpi(bottom, dpi)};
 }
 
+int MinimumRenderDpi(int baseDpi) {
+    return std::min(baseDpi, kUiMinimumRenderDpi);
+}
+
+int MaximumRenderDpi(int baseDpi) {
+    return std::max(baseDpi, MulDiv(baseDpi, kUiMaximumScalePercent, 100));
+}
+
+int ChooseRenderDpi(int baseDpi, int availableWidth, int availableHeight,
+    bool allowEnlarge) {
+    const int widthDpi = MulDiv(std::max(1, availableWidth), 96, kUiClientWidth);
+    const int heightDpi = MulDiv(std::max(1, availableHeight), 96, kUiClientHeight);
+    const int upperBound = allowEnlarge ? MaximumRenderDpi(baseDpi) : baseDpi;
+    int result = std::max(MinimumRenderDpi(baseDpi),
+        std::min(upperBound, std::min(widthDpi, heightDpi)));
+    const int minimum = MinimumRenderDpi(baseDpi);
+    while (result > minimum &&
+        (ScaleForDpi(kUiClientWidth, result) > availableWidth ||
+         ScaleForDpi(kUiClientHeight, result) > availableHeight)) {
+        --result;
+    }
+    return result;
+}
+
 UiLayout BuildUiLayout(int dpi) {
     return UiLayout{
         ScaleRect(28, 14, 570, 52, dpi),
@@ -1584,6 +1620,22 @@ UiLayout BuildUiLayout(int dpi) {
         ScaleRect(36, 638, 378, 682, dpi),
         ScaleRect(402, 638, 744, 682, dpi),
         ScaleRect(20, 718, 760, 846, dpi)};
+}
+
+void OffsetUiLayout(UiLayout& layout, int offsetX, int offsetY) {
+    OffsetRect(&layout.title, offsetX, offsetY);
+    OffsetRect(&layout.author, offsetX, offsetY);
+    OffsetRect(&layout.system, offsetX, offsetY);
+    OffsetRect(&layout.description, offsetX, offsetY);
+    OffsetRect(&layout.updatePanel, offsetX, offsetY);
+    OffsetRect(&layout.updateCard, offsetX, offsetY);
+    OffsetRect(&layout.disableButton, offsetX, offsetY);
+    OffsetRect(&layout.restoreButton, offsetX, offsetY);
+    OffsetRect(&layout.upgradePanel, offsetX, offsetY);
+    OffsetRect(&layout.upgradeCard, offsetX, offsetY);
+    OffsetRect(&layout.upgradeDisableButton, offsetX, offsetY);
+    OffsetRect(&layout.upgradeRestoreButton, offsetX, offsetY);
+    OffsetRect(&layout.warning, offsetX, offsetY);
 }
 
 enum class StatusVisual { Neutral, Success, Warning, Error };
@@ -1971,8 +2023,92 @@ void DrawOwnerButton(const DRAWITEMSTRUCT& item) {
     }
 }
 
-void SetControlFont(HWND control, HFONT font) {
-    SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+void SetControlFont(HWND control, HFONT font, bool redraw = true) {
+    if (control && font) {
+        SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), redraw ? TRUE : FALSE);
+    }
+}
+
+void ReapRetiredFonts(UiContext& ui) {
+    auto it = ui.retiredFonts.begin();
+    while (it != ui.retiredFonts.end()) {
+        if (DeleteObject(*it)) it = ui.retiredFonts.erase(it);
+        else ++it;
+    }
+}
+
+void RetireUiFont(UiContext& ui, HFONT font) {
+    if (!font) return;
+    if (!DeleteObject(font)) ui.retiredFonts.push_back(font);
+}
+
+void CreateUiFonts(UiContext& ui, int dpi) {
+    HFONT normalFont = CreateFontW(-MulDiv(10, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+    HFONT titleFont = CreateFontW(-MulDiv(17, dpi, 72), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+    HFONT cardTitleFont = CreateFontW(-MulDiv(13, dpi, 72), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+    HFONT stateFont = CreateFontW(-MulDiv(18, dpi, 72), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+    HFONT badgeFont = CreateFontW(-MulDiv(9, dpi, 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+    HFONT buttonFont = CreateFontW(-MulDiv(11, dpi, 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+    HFONT authorFont = CreateFontW(-MulDiv(9, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+    if (!normalFont || !titleFont || !cardTitleFont || !stateFont ||
+        !badgeFont || !buttonFont || !authorFont) {
+        if (normalFont) DeleteObject(normalFont);
+        if (titleFont) DeleteObject(titleFont);
+        if (cardTitleFont) DeleteObject(cardTitleFont);
+        if (stateFont) DeleteObject(stateFont);
+        if (badgeFont) DeleteObject(badgeFont);
+        if (buttonFont) DeleteObject(buttonFont);
+        if (authorFont) DeleteObject(authorFont);
+        ThrowWin32(L"创建界面字体");
+    }
+    const HFONT oldNormalFont = ui.normalFont;
+    const HFONT oldTitleFont = ui.titleFont;
+    const HFONT oldCardTitleFont = ui.cardTitleFont;
+    const HFONT oldStateFont = ui.stateFont;
+    const HFONT oldBadgeFont = ui.badgeFont;
+    const HFONT oldButtonFont = ui.buttonFont;
+    const HFONT oldAuthorFont = ui.authorFont;
+    ui.normalFont = normalFont;
+    ui.titleFont = titleFont;
+    ui.cardTitleFont = cardTitleFont;
+    ui.stateFont = stateFont;
+    ui.badgeFont = badgeFont;
+    ui.buttonFont = buttonFont;
+    ui.authorFont = authorFont;
+
+    for (HWND control : {ui.system, ui.description, ui.status,
+         ui.disableButton, ui.restoreButton, ui.upgradeStatus,
+         ui.upgradeDisableButton, ui.upgradeRestoreButton, ui.warning}) {
+        SetControlFont(control, ui.normalFont, false);
+    }
+    SetControlFont(ui.title, ui.titleFont, false);
+    SetControlFont(ui.author, ui.authorFont, false);
+    for (HWND button : {ui.disableButton, ui.restoreButton,
+         ui.upgradeDisableButton, ui.upgradeRestoreButton}) {
+        SetControlFont(button, ui.buttonFont, false);
+    }
+    RetireUiFont(ui, oldNormalFont);
+    RetireUiFont(ui, oldTitleFont);
+    RetireUiFont(ui, oldCardTitleFont);
+    RetireUiFont(ui, oldStateFont);
+    RetireUiFont(ui, oldBadgeFont);
+    RetireUiFont(ui, oldButtonFont);
+    RetireUiFont(ui, oldAuthorFont);
+    ReapRetiredFonts(ui);
 }
 
 int MeasureTextWidth(HDC dc, const std::wstring& text) {
@@ -2339,6 +2475,128 @@ bool DrawOwnerItemBuffered(const DRAWITEMSTRUCT& item, const UiContext& ui) {
     return handled;
 }
 
+void MoveChildToRect(HWND child, const RECT& rect) {
+    if (!child) return;
+    SetWindowPos(child, nullptr, rect.left, rect.top,
+        rect.right - rect.left, rect.bottom - rect.top,
+        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
+}
+
+struct ChildPlacement {
+    HWND window = nullptr;
+    RECT rect{};
+};
+
+void MoveChildren(const std::array<ChildPlacement, 11>& placements) {
+    HDWP deferred = BeginDeferWindowPos(static_cast<int>(placements.size()));
+    bool batchFailed = deferred == nullptr;
+    if (!batchFailed) {
+        for (const ChildPlacement& placement : placements) {
+            if (!placement.window) continue;
+            HDWP next = DeferWindowPos(deferred, placement.window, nullptr,
+                placement.rect.left, placement.rect.top,
+                placement.rect.right - placement.rect.left,
+                placement.rect.bottom - placement.rect.top,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
+            if (!next) {
+                batchFailed = true;
+                break;
+            }
+            deferred = next;
+        }
+    }
+    if (!batchFailed) {
+        if (EndDeferWindowPos(deferred)) return;
+        deferred = nullptr;
+    } else if (deferred) {
+        EndDeferWindowPos(deferred);
+    }
+    for (const ChildPlacement& placement : placements) {
+        MoveChildToRect(placement.window, placement.rect);
+    }
+}
+
+void LayoutControls(HWND window, UiContext& ui, bool updateRenderDpi = true) {
+    if (ui.layingOut) return;
+    ui.layingOut = true;
+
+    RECT client = {};
+    GetClientRect(window, &client);
+    int clientWidth = std::max(0, static_cast<int>(client.right - client.left));
+    int clientHeight = std::max(0, static_cast<int>(client.bottom - client.top));
+    int renderDpi = ui.dpi;
+    bool needsScrollbar = ui.scrollBarVisible;
+    if (updateRenderDpi) {
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            GetClientRect(window, &client);
+            clientWidth = std::max(0, static_cast<int>(client.right - client.left));
+            clientHeight = std::max(0, static_cast<int>(client.bottom - client.top));
+            renderDpi = ChooseRenderDpi(ui.baseDpi, clientWidth, clientHeight, true);
+            needsScrollbar = ScaleForDpi(kUiClientHeight, renderDpi) > clientHeight;
+            if (needsScrollbar == ui.scrollBarVisible) break;
+            ui.scrollBarVisible = needsScrollbar;
+            ShowScrollBar(window, SB_VERT, needsScrollbar ? TRUE : FALSE);
+        }
+        ShowScrollBar(window, SB_VERT, ui.scrollBarVisible ? TRUE : FALSE);
+        GetClientRect(window, &client);
+        clientWidth = std::max(0, static_cast<int>(client.right - client.left));
+        clientHeight = std::max(0, static_cast<int>(client.bottom - client.top));
+        renderDpi = ChooseRenderDpi(ui.baseDpi, clientWidth, clientHeight, true);
+    }
+
+    if (renderDpi != ui.dpi) {
+        ui.dpi = renderDpi;
+    }
+    if (ui.fontDpi != ui.dpi && !ui.inSizeMove) {
+        CreateUiFonts(ui, ui.dpi);
+        ui.fontDpi = ui.dpi;
+    }
+    const int contentWidth = ScaleForDpi(kUiClientWidth, ui.dpi);
+    const int contentHeight = ScaleForDpi(kUiClientHeight, ui.dpi);
+    const int maxScroll = std::max(0, contentHeight - clientHeight);
+    ui.scrollOffset = std::max(0, std::min(ui.scrollOffset, maxScroll));
+    ui.contentOriginX = std::max(0, (clientWidth - contentWidth) / 2);
+
+    SCROLLINFO scrollInfo = {sizeof(scrollInfo)};
+    scrollInfo.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    scrollInfo.nMin = 0;
+    scrollInfo.nMax = std::max(0, contentHeight - 1);
+    scrollInfo.nPage = static_cast<UINT>(clientHeight);
+    scrollInfo.nPos = ui.scrollOffset;
+    SetScrollInfo(window, SB_VERT, &scrollInfo, TRUE);
+
+    UiLayout layout = BuildUiLayout(ui.dpi);
+    OffsetUiLayout(layout, ui.contentOriginX, -ui.scrollOffset);
+    MoveChildren({{
+        {ui.title, layout.title},
+        {ui.author, layout.author},
+        {ui.system, layout.system},
+        {ui.description, layout.description},
+        {ui.status, layout.updateCard},
+        {ui.disableButton, layout.disableButton},
+        {ui.restoreButton, layout.restoreButton},
+        {ui.upgradeStatus, layout.upgradeCard},
+        {ui.upgradeDisableButton, layout.upgradeDisableButton},
+        {ui.upgradeRestoreButton, layout.upgradeRestoreButton},
+        {ui.warning, layout.warning}
+    }});
+    RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+    ui.layingOut = false;
+}
+
+void ScrollTo(HWND window, UiContext& ui, int position) {
+    RECT client = {};
+    GetClientRect(window, &client);
+    const int contentHeight = ScaleForDpi(kUiClientHeight, ui.dpi);
+    const int maxScroll = std::max(0, contentHeight -
+        static_cast<int>(client.bottom - client.top));
+    const int clamped = std::max(0, std::min(position, maxScroll));
+    if (clamped == ui.scrollOffset) return;
+    ui.scrollOffset = clamped;
+    LayoutControls(window, ui);
+    InvalidateRect(window, nullptr, FALSE);
+}
+
 std::wstring BuildAccessibleStatusText(const std::wstring& header,
     const std::vector<StatusRow>& rows) {
     std::wstring result = header;
@@ -2396,33 +2654,13 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
         if (!windowDc) ThrowWin32(L"读取窗口 DPI");
         const int dpi = GetDeviceCaps(windowDc, LOGPIXELSY);
         ReleaseDC(window, windowDc);
+        ui->baseDpi = dpi;
         ui->dpi = dpi;
         ui->backgroundBrush = CreateSolidBrush(RGB(247, 249, 252));
         if (!ui->backgroundBrush) ThrowWin32(L"创建界面画刷");
         const UiLayout layout = BuildUiLayout(dpi);
-        ui->normalFont = CreateFontW(-MulDiv(10, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-        ui->titleFont = CreateFontW(-MulDiv(17, dpi, 72), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-        ui->cardTitleFont = CreateFontW(-MulDiv(13, dpi, 72), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-        ui->stateFont = CreateFontW(-MulDiv(18, dpi, 72), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-        ui->badgeFont = CreateFontW(-MulDiv(9, dpi, 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-        ui->buttonFont = CreateFontW(-MulDiv(11, dpi, 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-        ui->authorFont = CreateFontW(-MulDiv(9, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-        if (!ui->normalFont || !ui->titleFont || !ui->cardTitleFont || !ui->stateFont ||
-            !ui->badgeFont || !ui->buttonFont || !ui->authorFont) ThrowWin32(L"创建界面字体");
+        CreateUiFonts(*ui, dpi);
+        ui->fontDpi = dpi;
 
         const auto width = [](const RECT& rect) { return rect.right - rect.left; };
         const auto height = [](const RECT& rect) { return rect.bottom - rect.top; };
@@ -2484,6 +2722,7 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
              ui->upgradeDisableButton, ui->upgradeRestoreButton}) {
             SetControlFont(button, ui->buttonFont);
         }
+        LayoutControls(window, *ui);
         RefreshUi(window, *ui);
         return 0;
     }
@@ -2503,7 +2742,8 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
             FillRect(bufferDc, &client, ui && ui->backgroundBrush ? ui->backgroundBrush :
                 reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
             if (ui) {
-                const UiLayout layout = BuildUiLayout(ui->dpi);
+                UiLayout layout = BuildUiLayout(ui->dpi);
+                OffsetUiLayout(layout, ui->contentOriginX, -ui->scrollOffset);
                 const VisualPalette updatePalette = PaletteFor(UpdateVisual(*ui));
                 const VisualPalette upgradePalette = PaletteFor(UpgradeVisual(*ui));
                 FillRoundedPanel(bufferDc, layout.updatePanel, updatePalette.panel,
@@ -2517,7 +2757,8 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
             FillRect(dc, &client, ui && ui->backgroundBrush ? ui->backgroundBrush :
                 reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
             if (ui) {
-                const UiLayout layout = BuildUiLayout(ui->dpi);
+                UiLayout layout = BuildUiLayout(ui->dpi);
+                OffsetUiLayout(layout, ui->contentOriginX, -ui->scrollOffset);
                 const VisualPalette updatePalette = PaletteFor(UpdateVisual(*ui));
                 const VisualPalette upgradePalette = PaletteFor(UpgradeVisual(*ui));
                 FillRoundedPanel(dc, layout.updatePanel, updatePalette.panel,
@@ -2531,6 +2772,70 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
         EndPaint(window, &paint);
         return 0;
     }
+    case WM_GETMINMAXINFO:
+        if (ui) {
+            auto* limits = reinterpret_cast<MINMAXINFO*>(lParam);
+            const int minimumDpi = MinimumRenderDpi(ui->baseDpi);
+            RECT minimum = {0, 0, ScaleForDpi(kUiMinimumClientWidth, minimumDpi),
+                ScaleForDpi(kUiMinimumClientHeight, minimumDpi)};
+            AdjustWindowRectEx(&minimum, WS_OVERLAPPEDWINDOW | WS_VSCROLL, FALSE, 0);
+            limits->ptMinTrackSize.x = minimum.right - minimum.left;
+            limits->ptMinTrackSize.y = minimum.bottom - minimum.top;
+            return 0;
+        }
+        break;
+    case WM_SIZE:
+        if (ui) {
+            LayoutControls(window, *ui, true);
+            return 0;
+        }
+        break;
+    case WM_ENTERSIZEMOVE:
+        if (ui) {
+            ui->inSizeMove = true;
+            return 0;
+        }
+        break;
+    case WM_EXITSIZEMOVE:
+        if (ui) {
+            ui->inSizeMove = false;
+            LayoutControls(window, *ui, true);
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        }
+        break;
+    case WM_VSCROLL:
+        if (ui) {
+            SCROLLINFO scrollInfo = {sizeof(scrollInfo)};
+            scrollInfo.fMask = SIF_ALL;
+            GetScrollInfo(window, SB_VERT, &scrollInfo);
+            int position = scrollInfo.nPos;
+            const int line = ScaleForDpi(40, ui->dpi);
+            switch (LOWORD(wParam)) {
+            case SB_LINEUP: position -= line; break;
+            case SB_LINEDOWN: position += line; break;
+            case SB_PAGEUP: position -= static_cast<int>(scrollInfo.nPage); break;
+            case SB_PAGEDOWN: position += static_cast<int>(scrollInfo.nPage); break;
+            case SB_THUMBPOSITION:
+            case SB_THUMBTRACK: position = scrollInfo.nTrackPos; break;
+            case SB_TOP: position = scrollInfo.nMin; break;
+            case SB_BOTTOM: position = scrollInfo.nMax - static_cast<int>(scrollInfo.nPage) + 1; break;
+            default: return 0;
+            }
+            ScrollTo(window, *ui, position);
+            return 0;
+        }
+        break;
+    case WM_MOUSEWHEEL:
+        if (ui) {
+            const int wheelDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+            if (wheelDelta != 0) {
+                ScrollTo(window, *ui, ui->scrollOffset -
+                    (wheelDelta / WHEEL_DELTA) * ScaleForDpi(64, ui->dpi));
+            }
+            return 0;
+        }
+        break;
     case WM_COMMAND:
         if (!ui) break;
         if (LOWORD(wParam) == IDC_DISABLE && HIWORD(wParam) == BN_CLICKED) {
@@ -2621,6 +2926,9 @@ LRESULT WindowProcImpl(HWND window, UINT message, WPARAM wParam, LPARAM lParam) 
             if (ui->badgeFont) DeleteObject(ui->badgeFont);
             if (ui->buttonFont) DeleteObject(ui->buttonFont);
             if (ui->authorFont) DeleteObject(ui->authorFont);
+            ReapRetiredFonts(*ui);
+            for (HFONT font : ui->retiredFonts) DeleteObject(font);
+            ui->retiredFonts.clear();
             if (ui->backgroundBrush) DeleteObject(ui->backgroundBrush);
         }
         PostQuitMessage(0); return 0;
@@ -2703,12 +3011,27 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         if (!screenDc) ThrowWin32(L"读取屏幕 DPI");
         const int windowDpi = GetDeviceCaps(screenDc, LOGPIXELSY);
         ReleaseDC(nullptr, screenDc);
-        RECT rect = {0, 0, ScaleForDpi(kUiClientWidth, windowDpi),
-            ScaleForDpi(kUiClientHeight, windowDpi)};
-        AdjustWindowRectEx(&rect, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, 0);
+        const DWORD windowStyle = WS_OVERLAPPEDWINDOW | WS_VSCROLL;
+        RECT workArea = {};
+        if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0) ||
+            workArea.right <= workArea.left || workArea.bottom <= workArea.top) {
+            workArea = RECT{0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+        }
+        const int workWidth = workArea.right - workArea.left;
+        const int workHeight = workArea.bottom - workArea.top;
+        const int initialDpi = ChooseRenderDpi(windowDpi,
+            workWidth - ScaleForDpi(24, windowDpi),
+            workHeight - ScaleForDpi(72, windowDpi), false);
+        const int clientWidth = ScaleForDpi(kUiClientWidth, initialDpi);
+        const int clientHeight = ScaleForDpi(kUiClientHeight, initialDpi);
+        RECT rect = {0, 0, clientWidth, clientHeight};
+        AdjustWindowRectEx(&rect, windowStyle, FALSE, 0);
+        const int windowWidth = rect.right - rect.left;
+        const int windowHeight = rect.bottom - rect.top;
+        const int windowX = workArea.left + std::max(0, (workWidth - windowWidth) / 2);
+        const int windowY = workArea.top + std::max(0, (workHeight - windowHeight) / 2);
         HWND window = CreateWindowExW(0, wc.lpszClassName, kAppName,
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-            CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top,
+            windowStyle, windowX, windowY, windowWidth, windowHeight,
             nullptr, nullptr, instance, &ui);
         if (!window) ThrowWin32(L"创建主窗口");
         HICON icon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_APP_ICON));

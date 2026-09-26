@@ -308,6 +308,24 @@ int wmain() {
                 L"禁止图标在 DPI 缩放后为空或被裁切。" );
         }
 
+        for (const int baseDpi : {96, 120, 144}) {
+            const int compactDpi = ChooseRenderDpi(baseDpi, 590, 689, true);
+            Require(compactDpi >= MinimumRenderDpi(baseDpi) &&
+                ScaleForDpi(kUiClientWidth, compactDpi) <= 590 &&
+                ScaleForDpi(kUiClientHeight, compactDpi) <= 689,
+                L"125%/150% DPI 下的紧凑客户区仍然超出可用空间。" );
+            Require(!(ScaleForDpi(kUiClientHeight, compactDpi) > 689),
+                L"紧凑客户区错误地需要垂直滚动条。" );
+
+            int previousDpi = MinimumRenderDpi(baseDpi);
+            for (int availableHeight = 420; availableHeight <= 900; availableHeight += 17) {
+                const int candidate = ChooseRenderDpi(baseDpi, 900, availableHeight, true);
+                Require(candidate >= previousDpi,
+                    L"可用高度增加时渲染 DPI 不应反向下降。" );
+                previousDpi = candidate;
+            }
+        }
+
         ModernUpdateController modern(L"Windows 10");
         modern.TestSetBackupPath(testDirectory + L"\\policy-backup-v1.txt");
         RemoveIfPresent(modern.TestBackupPath());
@@ -408,14 +426,16 @@ int wmain() {
         windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
         windowClass.lpszClassName = L"AchangUser.UpdateLock.NativeTests";
         if (!RegisterClassExW(&windowClass)) ThrowWin32(L"注册界面测试窗口类");
+        const DWORD testWindowStyle = WS_OVERLAPPEDWINDOW | WS_VSCROLL;
         RECT testWindowRect = {0, 0, ScaleForDpi(kUiClientWidth, ui.dpi),
-            ScaleForDpi(kUiClientHeight, ui.dpi)};
-        AdjustWindowRectEx(&testWindowRect, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, 0);
+            ScaleForDpi(500, ui.dpi)};
+        AdjustWindowRectEx(&testWindowRect, testWindowStyle, FALSE, 0);
         HWND testWindow = CreateWindowExW(0, windowClass.lpszClassName, kAppName,
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, 0, 0,
+            testWindowStyle, 0, 0,
             testWindowRect.right - testWindowRect.left, testWindowRect.bottom - testWindowRect.top,
             nullptr, nullptr, windowClass.hInstance, &ui);
         if (!testWindow) ThrowWin32(L"创建界面布局测试窗口");
+        Require(ui.dpi < ui.baseDpi, L"小窗口没有触发 UI 整体缩放。" );
         const RECT updateCard = ChildClientRect(testWindow, IDC_STATUS);
         const RECT updateButton = ChildClientRect(testWindow, IDC_DISABLE);
         const RECT upgradeCard = ChildClientRect(testWindow, IDC_UPGRADE_STATUS);
@@ -432,8 +452,26 @@ int wmain() {
             upgradeButton.top - upgradeCard.bottom <= ScaleForDpi(14, ui.dpi),
             L"Windows 11 升级状态与操作按钮距离过大。" );
         Require(warningCard.top - upgradeButton.bottom >= ScaleForDpi(24, ui.dpi) &&
-            warningCard.bottom <= clientRect.bottom,
-            L"底部说明区域间距或客户区边界错误。" );
+            warningCard.bottom > clientRect.bottom && ui.scrollBarVisible,
+            L"底部说明区域间距或滚动区域判断错误。" );
+        SendMessageW(testWindow, WM_VSCROLL, MAKEWPARAM(SB_BOTTOM, 0), 0);
+        const RECT warningCardAtBottom = ChildClientRect(testWindow, IDC_WARNING);
+        Require(ui.scrollOffset > 0 && warningCardAtBottom.bottom <= clientRect.bottom,
+            L"垂直滚动未将底部说明区域滚动到可见范围。" );
+        RECT largeWindowRect = {0, 0, ScaleForDpi(1000, ui.baseDpi),
+            ScaleForDpi(1000, ui.baseDpi)};
+        AdjustWindowRectEx(&largeWindowRect, testWindowStyle, FALSE, 0);
+        if (!SetWindowPos(testWindow, nullptr, 0, 0,
+            largeWindowRect.right - largeWindowRect.left,
+            largeWindowRect.bottom - largeWindowRect.top,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)) {
+            ThrowWin32(L"调整界面放大测试窗口");
+        }
+        if (!(ui.dpi > ui.baseDpi && !ui.scrollBarVisible)) {
+            throw AppError(L"大窗口缩放结果异常：renderDpi=" + std::to_wstring(ui.dpi) +
+                L"，baseDpi=" + std::to_wstring(ui.baseDpi) +
+                L"，scrollBarVisible=" + (ui.scrollBarVisible ? L"true" : L"false"));
+        }
         DestroyWindow(testWindow);
         UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
         if (!RemoveDirectoryW(testDirectory.c_str())) ThrowWin32(L"删除测试临时目录");
