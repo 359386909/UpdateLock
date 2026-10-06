@@ -1,6 +1,7 @@
 # Win7/10/11自动更新关闭工具v3.2
 
 一个原生 C++/Win32 单文件工具，自动识别 Windows 7、Windows 10、Windows 11 或 Windows Server 2016，并使用对应策略关闭 Windows Update。
+<img width="782" height="888" alt="image" src="https://github.com/user-attachments/assets/5549c8f1-ce24-45c9-9102-7924b6694e1b" />
 
 ## 主要特性
 
